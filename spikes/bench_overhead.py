@@ -57,6 +57,7 @@ from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
+import spike_capture
 from workloads import WORKLOADS
 
 WORKLOAD_FILE = str(Path(__file__).parent / "workloads.py")
@@ -130,12 +131,28 @@ def _run_monitoring(
     work: Callable[[], Any],
     callback: Callable[..., Any],
     get_count: Callable[[], int],
+    *,
+    gc_live: bool = False,
 ) -> tuple[float, int]:
+    """Time `work` with `callback` on LINE events.
+
+    Args:
+        work: the workload.
+        callback: the LINE handler.
+        get_count: reports how many events the callback saw.
+        gc_live: leave GC running across the timed region. The capture
+            conditions set this: capture allocates, and allocation is exactly
+            what triggers collection, so suppressing GC would flatter the two
+            conditions whose realism matters most.
+    """
     mon = sys.monitoring
     mon.use_tool_id(TOOL_ID, "chronotrace-spike")
+    gc_ctx = contextlib.nullcontext() if gc_live else _no_gc()
     try:
         mon.register_callback(TOOL_ID, mon.events.LINE, callback)
-        with _no_gc():
+        if gc_live:
+            gc.collect()
+        with gc_ctx:
             try:
                 mon.set_events(TOOL_ID, mon.events.LINE)
                 t0 = time.perf_counter()
@@ -195,12 +212,79 @@ def run_mon_line_scoped(work: Callable[[], Any]) -> tuple[float, int]:
     return _run_monitoring(work, cb, lambda: len(sink))
 
 
+def run_mon_capture_scoped(work: Callable[[], Any]) -> tuple[float, int]:
+    """The honest combined figure: scoping + real value capture of frame locals.
+
+    Every other condition measures the *floor* -- appending a tuple is not
+    recording. This one captures the frame's locals through the day-3 spike
+    capturer, which is what the product will actually do. It is the number
+    ADR-0001 turns on.
+
+    GC stays live here, unlike the other conditions: capture allocates, and
+    allocation is exactly what triggers collection. Suppressing GC would flatter
+    the one condition whose realism matters most.
+    """
+    sink: list[Any] = []
+    disable = sys.monitoring.DISABLE
+    target = WORKLOAD_FILE
+    cap = spike_capture.capture
+
+    def cb(code: Any, line_number: int) -> Any:
+        if code.co_filename != target:
+            return disable
+        frame = sys._getframe(1)
+        sink.append({k: cap(v) for k, v in frame.f_locals.items()})
+        return None
+
+    return _run_monitoring(work, cb, lambda: len(sink), gc_live=True)
+
+
+def run_mon_capture_changed(work: Callable[[], Any]) -> tuple[float, int]:
+    """Capture only bindings whose value identity changed since the last event.
+
+    Tests the day-8 hypothesis directly, because ADR-0001 cannot bet on a fix
+    nobody has measured. `mon_capture_scoped` re-captures every local on every
+    line -- a 1200-element list gets walked 13,210 times though it never changes
+    after line one. This skips the unchanged ones.
+
+    **This is an optimistic bound, not a shippable design.** Identity is an
+    unsound proxy for "unchanged": `lst.append(x)` mutates in place and keeps the
+    same id, so this would miss the write and show the user stale state -- the
+    worst failure a debugger has. Day 8 makes it sound by restricting the
+    identity shortcut to immutable types and re-capturing mutables. That will
+    cost more than this measures; this is the ceiling, and the honest figure sits
+    between this and `mon_capture_scoped`.
+    """
+    sink: list[Any] = []
+    last: dict[tuple[int, str], int] = {}
+    disable = sys.monitoring.DISABLE
+    target = WORKLOAD_FILE
+    cap = spike_capture.capture
+
+    def cb(code: Any, line_number: int) -> Any:
+        if code.co_filename != target:
+            return disable
+        frame = sys._getframe(1)
+        fid = id(frame)
+        for k, v in frame.f_locals.items():
+            key = (fid, k)
+            vid = id(v)
+            if last.get(key) != vid:
+                last[key] = vid
+                sink.append(cap(v))
+        return None
+
+    return _run_monitoring(work, cb, lambda: len(sink), gc_live=True)
+
+
 RUNNERS: dict[str, Callable[[Callable[[], Any]], tuple[float, int]]] = {
     "baseline": run_baseline,
     "settrace_noop": run_settrace_noop,
     "mon_line_noop": run_mon_line_noop,
     "mon_line_append": run_mon_line_append,
     "mon_line_scoped": run_mon_line_scoped,
+    "mon_capture_scoped": run_mon_capture_scoped,
+    "mon_capture_changed": run_mon_capture_changed,
 }
 
 
