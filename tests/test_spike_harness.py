@@ -35,10 +35,6 @@ def _child(condition: str, workload: str) -> dict[str, float]:
     return result
 
 
-def test_bench_script_exists() -> None:
-    assert BENCH.is_file(), f"spike harness missing at {BENCH}"
-
-
 def test_baseline_reports_no_events() -> None:
     """Baseline must be genuinely uninstrumented, or every ratio is wrong."""
     assert _child("baseline", "fib_recursive")["events"] == 0

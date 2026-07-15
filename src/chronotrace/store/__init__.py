@@ -25,5 +25,3 @@ into the recorder's runtime machinery (monitoring callbacks, frame registry);
 that direction of knowledge would couple the file format to the mechanics of
 observation, and the two must be free to change independently.
 """
-
-from __future__ import annotations

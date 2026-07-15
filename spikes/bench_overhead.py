@@ -46,13 +46,14 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import contextlib
 import gc
 import json
 import statistics
 import subprocess
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -60,42 +61,11 @@ from workloads import WORKLOADS
 
 WORKLOAD_FILE = str(Path(__file__).parent / "workloads.py")
 
-CONDITIONS = [
-    "baseline",
-    "settrace_noop",
-    "mon_line_noop",
-    "mon_line_append",
-    "mon_line_scoped",
-]
-
-
-# ---------------------------------------------------------------------------
-# Tool ID policy
-# ---------------------------------------------------------------------------
-
-
-def acquire_tool_id() -> int:
-    """Claim a sys.monitoring tool id without ever stealing one.
-
-    There are only six ids, four of them conventionally spoken for (DEBUGGER=0,
-    COVERAGE=1, PROFILER=2, OPTIMIZER=5). ChronoTrace is a debugger, so it wants
-    DEBUGGER_ID -- but another tool may already hold it, and a debugger that
-    kicks out whatever was there is a debugger that corrupts someone else's
-    session. We ask, we fall back, and we fail loudly rather than force it.
-
-    Returns:
-        A tool id we now own and must free.
-
-    Raises:
-        RuntimeError: every id is taken, naming the holders so the user can act.
-    """
-    mon = sys.monitoring
-    for tool_id in (mon.DEBUGGER_ID, 3, 4):
-        if mon.get_tool(tool_id) is None:
-            mon.use_tool_id(tool_id, "chronotrace-spike")
-            return tool_id
-    holders = {i: mon.get_tool(i) for i in range(6)}
-    raise RuntimeError(f"no free sys.monitoring tool id; holders={holders}")
+# PEP 669 reserves 0/1/2/5 for debugger/coverage/profiler/optimizer and leaves
+# 3 and 4 free. The real recorder's acquire-and-fall-back policy is a day 5
+# product decision and is argued in RESULTS-overhead.md; it does not belong in
+# throwaway code.
+TOOL_ID = 3
 
 
 # ---------------------------------------------------------------------------
@@ -103,20 +73,29 @@ def acquire_tool_id() -> int:
 # ---------------------------------------------------------------------------
 
 
-def _timed(fn: Callable[[], Any]) -> float:
+@contextlib.contextmanager
+def _no_gc() -> Iterator[None]:
+    """Collect, then hold GC off across the timed region.
+
+    Buys stability, costs realism -- and understates the append condition
+    specifically, whose 750k allocations are exactly what would trigger a
+    collection. Stated in RESULTS-overhead.md rather than hidden; day 3
+    re-measures with GC live.
+    """
     gc.collect()
     gc.disable()
     try:
-        t0 = time.perf_counter()
-        fn()
-        return time.perf_counter() - t0
+        yield
     finally:
         gc.enable()
 
 
 def run_baseline(work: Callable[[], Any]) -> tuple[float, int]:
     """No instrumentation at all. The denominator for every other number."""
-    return _timed(work), 0
+    with _no_gc():
+        t0 = time.perf_counter()
+        work()
+        return time.perf_counter() - t0, 0
 
 
 def run_settrace_noop(work: Callable[[], Any]) -> tuple[float, int]:
@@ -136,57 +115,50 @@ def run_settrace_noop(work: Callable[[], Any]) -> tuple[float, int]:
     def global_tracer(frame: Any, event: str, arg: Any) -> Any:
         return local_tracer
 
-    gc.collect()
-    gc.disable()
-    try:
-        sys.settrace(global_tracer)
-        t0 = time.perf_counter()
-        work()
-        elapsed = time.perf_counter() - t0
-    finally:
-        sys.settrace(None)
-        gc.enable()
+    with _no_gc():
+        try:
+            sys.settrace(global_tracer)
+            t0 = time.perf_counter()
+            work()
+            elapsed = time.perf_counter() - t0
+        finally:
+            sys.settrace(None)
     return elapsed, count
 
 
 def _run_monitoring(
     work: Callable[[], Any],
-    make_callback: Callable[[], tuple[Callable[..., Any], Callable[[], int]]],
+    callback: Callable[..., Any],
+    get_count: Callable[[], int],
 ) -> tuple[float, int]:
     mon = sys.monitoring
-    tool_id = acquire_tool_id()
-    callback, get_count = make_callback()
+    mon.use_tool_id(TOOL_ID, "chronotrace-spike")
     try:
-        mon.register_callback(tool_id, mon.events.LINE, callback)
-        gc.collect()
-        gc.disable()
-        try:
-            mon.set_events(tool_id, mon.events.LINE)
-            t0 = time.perf_counter()
-            work()
-            elapsed = time.perf_counter() - t0
-        finally:
-            mon.set_events(tool_id, 0)
-            gc.enable()
+        mon.register_callback(TOOL_ID, mon.events.LINE, callback)
+        with _no_gc():
+            try:
+                mon.set_events(TOOL_ID, mon.events.LINE)
+                t0 = time.perf_counter()
+                work()
+                elapsed = time.perf_counter() - t0
+            finally:
+                mon.set_events(TOOL_ID, 0)
     finally:
-        mon.register_callback(tool_id, mon.events.LINE, None)
-        mon.free_tool_id(tool_id)
+        mon.register_callback(TOOL_ID, mon.events.LINE, None)
+        mon.free_tool_id(TOOL_ID)
     return elapsed, get_count()
 
 
 def run_mon_line_noop(work: Callable[[], Any]) -> tuple[float, int]:
     """LINE events with the cheapest possible callback: just count."""
+    count = 0
 
-    def make() -> tuple[Callable[..., Any], Callable[[], int]]:
-        box = [0]
+    def cb(code: Any, line_number: int) -> Any:
+        nonlocal count
+        count += 1
+        return None
 
-        def cb(code: Any, line_number: int) -> Any:
-            box[0] += 1
-            return None
-
-        return cb, lambda: box[0]
-
-    return _run_monitoring(work, make)
+    return _run_monitoring(work, cb, lambda: count)
 
 
 def run_mon_line_append(work: Callable[[], Any]) -> tuple[float, int]:
@@ -194,17 +166,13 @@ def run_mon_line_append(work: Callable[[], Any]) -> tuple[float, int]:
 
     Closest condition to what ChronoTrace will actually do, minus value capture.
     """
+    sink: list[tuple[int, int]] = []
 
-    def make() -> tuple[Callable[..., Any], Callable[[], int]]:
-        sink: list[tuple[int, int]] = []
+    def cb(code: Any, line_number: int) -> Any:
+        sink.append((id(code), line_number))
+        return None
 
-        def cb(code: Any, line_number: int) -> Any:
-            sink.append((id(code), line_number))
-            return None
-
-        return cb, lambda: len(sink)
-
-    return _run_monitoring(work, make)
+    return _run_monitoring(work, cb, lambda: len(sink))
 
 
 def run_mon_line_scoped(work: Callable[[], Any]) -> tuple[float, int]:
@@ -214,21 +182,17 @@ def run_mon_line_scoped(work: Callable[[], Any]) -> tuple[float, int]:
     per execution. This is the number that decides whether scope filtering is a
     micro-optimisation or the whole ballgame.
     """
+    sink: list[tuple[int, int]] = []
+    disable = sys.monitoring.DISABLE
+    target = WORKLOAD_FILE
 
-    def make() -> tuple[Callable[..., Any], Callable[[], int]]:
-        sink: list[tuple[int, int]] = []
-        disable = sys.monitoring.DISABLE
-        target = WORKLOAD_FILE
+    def cb(code: Any, line_number: int) -> Any:
+        if code.co_filename != target:
+            return disable
+        sink.append((id(code), line_number))
+        return None
 
-        def cb(code: Any, line_number: int) -> Any:
-            if code.co_filename != target:
-                return disable
-            sink.append((id(code), line_number))
-            return None
-
-        return cb, lambda: len(sink)
-
-    return _run_monitoring(work, make)
+    return _run_monitoring(work, cb, lambda: len(sink))
 
 
 RUNNERS: dict[str, Callable[[Callable[[], Any]], tuple[float, int]]] = {
@@ -299,7 +263,7 @@ def main() -> int:
 
     results: list[dict[str, Any]] = []
     for workload in WORKLOADS:
-        for condition in CONDITIONS:
+        for condition in RUNNERS:
             row = measure(condition, workload, args.reps)
             results.append(row)
             print(
@@ -319,7 +283,7 @@ def main() -> int:
             for r in results
             if r["workload"] == workload and r["condition"] == "baseline"
         )
-        for condition in CONDITIONS:
+        for condition in RUNNERS:
             row = next(
                 r for r in results if r["workload"] == workload and r["condition"] == condition
             )
@@ -329,9 +293,6 @@ def main() -> int:
                 f"{row['median'] * 1000:>9.2f}ms {ratio:>8.1f}x {row['events']:>12,}"
             )
 
-    if args.json_out:
-        args.json_out.write_text(json.dumps(results, indent=2), encoding="utf-8")
-        print(f"\nwrote {args.json_out}")
     return 0
 
 

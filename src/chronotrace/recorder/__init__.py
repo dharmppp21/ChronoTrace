@@ -21,5 +21,3 @@ defines a ``Sink`` protocol; day 12 adds the file-backed implementation), and it
 must not know that a storage format exists at all. If the recorder ever needs to
 know how bytes reach disk, the abstraction has failed.
 """
-
-from __future__ import annotations

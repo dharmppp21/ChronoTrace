@@ -24,8 +24,6 @@ top-level package exposes the version and nothing else; every subsystem is
 imported explicitly by the caller that needs it.
 """
 
-from __future__ import annotations
-
 from chronotrace._version import __version__
 
 __all__ = ["__version__"]

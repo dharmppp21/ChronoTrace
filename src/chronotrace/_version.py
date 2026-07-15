@@ -11,6 +11,4 @@ sources. Derive one from the other and the assertion becomes a tautology that
 passes unconditionally.
 """
 
-from __future__ import annotations
-
 __version__ = "0.1.0.dev0"
