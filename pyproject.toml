@@ -124,6 +124,11 @@ convention = "google"
 # Asserts ARE the test; docstrings on every test function are noise.
 "tests/**" = ["S101", "D"]
 
+# examples/ are demo programs whose LINE NUMBERS are asserted by the golden test in
+# tests/recorder/test_recorder.py. Adding a docstring to `double(n)` would say
+# "doubles n" (noise) and shift every line below it, breaking the test for no gain.
+"examples/**" = ["D103", "T20"]
+
 # Benchmarks are measurement scripts, not library code: print IS their output, and
 # the reasoning lives in module docstrings and benchmarks/RESULTS.md rather than on
 # each throwaway variant class. Same rationale as spikes/ below, different lifetime

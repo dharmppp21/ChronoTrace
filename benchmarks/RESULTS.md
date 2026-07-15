@@ -77,6 +77,54 @@ lookup, so one cache should serve both the scope decision and the `code_id`.
 
 ---
 
+## Day 5 — the real recorder vs day 2's no-op floor
+
+First measurement of the **actual** `Recorder`, not a spike callback that appends a
+tuple. Median of 5, `start()`/`stop()` inside the timed region (a user pays that too).
+
+| workload | baseline | recorder | vs base | events | ns/event |
+|---|---:|---:|---:|---:|---:|
+| tight_loop | 8.07 ms | 2753.61 ms | **341.2×** | 750,007 | 3661 |
+| fib_recursive | 8.84 ms | 2172.84 ms | 245.9× | 600,198 | 3605 |
+| json_pipeline | 15.59 ms | 1953.93 ms | **125.3×** | 195,774 | 9901 |
+| io_bound | 182.45 ms | 277.20 ms | 1.5× | 457 | — |
+
+### This is 21x above day 2's floor, and above ADR-0001's reversal trigger
+
+Day 2 measured ~170 ns/event for a callback that appended a tuple. The real
+callback costs **3661 ns/event**. ADR-0001's reversal trigger is "realistic
+workloads under ~20×"; json_pipeline is at 125×. **Today the recorder is outside
+its own budget.** Saying so plainly now is the point of measuring.
+
+Three dated fixes stand between here and that trigger, and none is speculative:
+
+1. **Day 9 — stdlib scope filtering.** json_pipeline recorded **195,774** events
+   today against day 2's scoped **13,210**, because today's scope only excludes
+   ChronoTrace itself; `strptime` and `statistics` are still recorded in full. A
+   ~15x event reduction is already measured on this exact workload.
+2. **Day 8 — value dedup / change detection.** Day 3 measured this as the
+   difference between 2,370× and 6.1×.
+3. **Days 40-41 — profile and optimise.** The per-event budget has obvious
+   suspects, none yet measured individually: `Event` construction (827 ns, day 4),
+   `time.perf_counter_ns`, `threading.get_ident`, the `threading.local` probe,
+   `intern` (71 ns — code objects hash by value), and two method calls.
+
+Day 40 is the reckoning; this row is what it will be measured against.
+
+### Two caveats that keep the table honest
+
+* **io_bound's 1.5× is fixed cost, not per-event cost.** 457 events cannot account
+  for 95 ms. `set_events` instruments code objects across the whole process, and
+  that one-time price is inside the timed region here. It is real — a user pays it
+  — but it is a startup cost, not a tracing cost, and it will not grow with
+  program length. Worth isolating on day 40.
+* **These are not comparable to day 2's "scoped" rows.** Day 2 scoped to one
+  module; today's scope only excludes ChronoTrace. The fair day-2 comparison is
+  `mon_line_append` (178,917 events, 5.1×) — against which we are ~20x more
+  expensive per event.
+
+---
+
 ## Standing budgets
 
 | thing | budget | current | measured |
