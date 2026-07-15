@@ -116,6 +116,22 @@ convention = "google"
 # Asserts ARE the test; docstrings on every test function are noise.
 "tests/**" = ["S101", "D"]
 
+# Spikes are throwaway by design (see spikes/README.md). They get a lighter
+# standard because their deliverable is a RESULTS-*.md file, not code that
+# anyone maintains -- holding a benchmark harness to library standards spends
+# effort on something we intend to delete.
+#
+# The relaxations are narrow and each has a reason:
+#   T20   -- print IS the harness's output mechanism
+#   S603/S607 -- it shells out to itself deliberately, for process isolation
+#   D103  -- module and function docstrings that carry reasoning are still
+#            required; only trivial per-runner docstrings are exempt
+#
+# Note what is NOT relaxed: correctness rules (F, B, E) still apply. A spike may
+# be scrappy; it may not be wrong, because we are about to bet the architecture
+# on its output.
+"spikes/**" = ["T20", "S603", "S607", "D103"]
+
 # ---------------------------------------------------------------------------
 # Types
 # ---------------------------------------------------------------------------
