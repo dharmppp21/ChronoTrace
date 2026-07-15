@@ -56,8 +56,6 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-sys.path.insert(0, str(Path(__file__).parent))
-
 from workloads import WORKLOADS
 
 WORKLOAD_FILE = str(Path(__file__).parent / "workloads.py")
@@ -260,18 +258,10 @@ def child_main(condition: str, workload_name: str) -> None:
 
 
 def _p95(values: list[float]) -> float:
-    """95th percentile by linear interpolation.
-
-    With small N this is close to the max; that is honest and stated in the
-    results rather than dressed up.
-    """
-    if len(values) == 1:
+    """95th percentile. With small N this is close to the max; stated in the results."""
+    if len(values) < 2:
         return values[0]
-    ordered = sorted(values)
-    pos = 0.95 * (len(ordered) - 1)
-    lo = int(pos)
-    hi = min(lo + 1, len(ordered) - 1)
-    return ordered[lo] + (ordered[hi] - ordered[lo]) * (pos - lo)
+    return statistics.quantiles(values, n=20, method="inclusive")[18]
 
 
 def measure(condition: str, workload: str, reps: int) -> dict[str, Any]:
@@ -301,7 +291,6 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--child", nargs=2, metavar=("CONDITION", "WORKLOAD"))
     parser.add_argument("--reps", type=int, default=7)
-    parser.add_argument("--json-out", type=Path)
     args = parser.parse_args()
 
     if args.child:
