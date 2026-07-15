@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Virtualenvs
+.venv/
+venv/
+env/
+
+# Tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# ChronoTrace's own output. Recordings contain the full memory of the recorded
+# program -- credentials, tokens, PII. They are as sensitive as a core dump and
+# must never be committed. See docs/threat-model.md (Phase 7).
+*.chrono
+*.chrono.idx
+recordings/
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db

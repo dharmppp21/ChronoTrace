@@ -1,0 +1,24 @@
+# Line-ending policy lives HERE, not in each developer's core.autocrlf.
+#
+# Why this file exists before any binary file does: ChronoTrace's whole product
+# is a binary log format (.chrono). Git for Windows commonly installs with
+# core.autocrlf=true, which rewrites LF -> CRLF on checkout. Applied to a binary
+# recording, that silently corrupts every 0x0A byte in the file and the failure
+# surfaces as an unreproducible CRC error weeks later.
+#
+# core.autocrlf is per-machine and does not travel with the repo. .gitattributes
+# does. Adding it after the first .chrono fixture lands is too late: git has
+# already normalised the blob on the way in.
+
+# Normalise text in the repo to LF; check out LF everywhere (including Windows).
+* text=auto eol=lf
+
+# Never touch these. Any translation is corruption.
+*.chrono binary
+*.chrono.idx binary
+*.zst binary
+*.png binary
+*.gif binary
+*.jpg binary
+*.ico binary
+*.whl binary

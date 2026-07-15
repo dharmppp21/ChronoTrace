@@ -1,0 +1,143 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "chronotrace"
+dynamic = ["version"]
+description = "A time-travel debugger for Python: record execution once, then scrub backward through it."
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "dharmppp21", email = "daddugaming16@gmail.com" }]
+keywords = [
+    "debugger",
+    "time-travel-debugging",
+    "reverse-debugging",
+    "sys-monitoring",
+    "pep-669",
+    "developer-tools",
+]
+classifiers = [
+    "Development Status :: 1 - Planning",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Software Development :: Debuggers",
+    "Typing :: Typed",
+]
+
+# Deliberately empty, and kept that way as long as possible.
+#
+# The recorder is imported INTO the process being debugged, so every dependency
+# we take becomes a dependency of the user's program: another entry in their
+# sys.modules, another version to conflict with theirs, another package the
+# scope filter must exclude from recording, and more startup cost they pay.
+# A debugger that cannot attach to a project because of a version clash in
+# ITS OWN dependency tree is a debugger nobody keeps installed.
+#
+# Phase 2 adds zstandard + msgpack (day 14) because compression is not something
+# to hand-roll. Phase 5 adds fastapi + uvicorn behind an optional [ui] extra
+# (day 33) precisely so recording stays lean for users who only record.
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/dharmppp21/ChronoTrace"
+Issues = "https://github.com/dharmppp21/ChronoTrace/issues"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-cov>=5",
+    "ruff>=0.9",
+    "mypy>=1.14",
+    "hypothesis>=6",
+]
+
+# ---------------------------------------------------------------------------
+# Build
+# ---------------------------------------------------------------------------
+
+# Single source of truth for the version. Phase 7 (day 45) asserts that the
+# git tag matches this value; that check is only meaningful while the two are
+# independent, which is why we do not derive the version from tags.
+[tool.hatch.version]
+path = "src/chronotrace/_version.py"
+
+# Naming the package explicitly makes it structurally impossible to ship
+# tests/, spikes/ or benchmarks/ in the wheel.
+[tool.hatch.build.targets.wheel]
+packages = ["src/chronotrace"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/chronotrace", "tests", "docs", "README.md", "LICENSE"]
+
+# ---------------------------------------------------------------------------
+# Lint + format (ruff is both; there is exactly one formatter in this project)
+# ---------------------------------------------------------------------------
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E", "W",  # pycodestyle
+    "F",       # pyflakes
+    "I",       # isort: deterministic import order => diffs show logic, not churn
+    "UP",      # pyupgrade: we are >=3.12; no legacy syntax should survive review
+    "B",       # bugbear: catches mutable-default-arg, which is literally one of
+               #   the bug classes our own demo program (day 10) is built around
+    "SIM",     # simplify
+    "C4",      # comprehensions
+    "PTH",     # pathlib over os.path: dev is Windows, CI is three OSes, and
+               #   string path munging is how cross-platform bugs get in
+    "RUF",     # ruff-specific correctness rules
+    "S",       # security: this project bans eval (day 30) and pickle (day 11).
+               #   Let the linter enforce those bans from commit one.
+    "T20",     # no stray print(): a print in the recorder hot path is a real
+               #   perf bug, and print-debugging is the thing we are replacing
+    "D",       # docstrings must exist; their content standard is in CONTRIBUTING
+]
+# ANN (flake8-annotations) is deliberately NOT enabled: mypy --strict already
+# rejects unannotated defs. Two tools enforcing one rule is duplicated logic.
+ignore = [
+    "D203",  # conflicts with D211 (we use "no blank line before class docstring")
+    "D213",  # conflicts with D212 (we use "summary on first line")
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.per-file-ignores]
+# Asserts ARE the test; docstrings on every test function are noise.
+"tests/**" = ["S101", "D"]
+
+# ---------------------------------------------------------------------------
+# Types
+# ---------------------------------------------------------------------------
+
+[tool.mypy]
+strict = true
+python_version = "3.12"
+files = ["src/chronotrace", "tests"]
+
+# Beyond --strict, and worth the noise for a project whose correctness story is
+# its selling point:
+warn_unreachable = true
+enable_error_code = ["redundant-expr", "possibly-undefined", "truthy-bool"]
+
+# NOTE: ignore_missing_imports is intentionally NOT set globally. Silencing every
+# unresolved import hides real mistakes. When a dependency genuinely ships no
+# stubs, add a narrow per-module override here and say why.
+
+# ---------------------------------------------------------------------------
+# Tests
+# ---------------------------------------------------------------------------
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers --strict-config"
