@@ -34,3 +34,6 @@ recordings/
 *.swp
 .DS_Store
 Thumbs.db
+
+# Spike harness output (regenerate with: python spikes/bench_overhead.py)
+spikes/results*.json
