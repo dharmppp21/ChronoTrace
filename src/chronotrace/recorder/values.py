@@ -21,7 +21,9 @@ the *implementation* is deliberately trivial until there is something to measure
 
 from __future__ import annotations
 
-from typing import Any, NewType
+from typing import NewType
+
+from chronotrace.recorder.capture import CapturedValue
 
 ValueRef = NewType("ValueRef", int)
 """Index into a `ValuePool`.
@@ -48,9 +50,9 @@ class ValuePool:
     __slots__ = ("_values",)
 
     def __init__(self) -> None:
-        self._values: list[Any] = []
+        self._values: list[CapturedValue] = []
 
-    def add(self, captured: Any) -> ValueRef:
+    def add(self, captured: CapturedValue) -> ValueRef:
         """Store a captured representation and return its reference.
 
         Args:
@@ -65,7 +67,7 @@ class ValuePool:
         self._values.append(captured)
         return ValueRef(len(self._values) - 1)
 
-    def resolve(self, ref: ValueRef) -> Any:
+    def resolve(self, ref: ValueRef) -> CapturedValue:
         """Return the captured representation for `ref`.
 
         Args:

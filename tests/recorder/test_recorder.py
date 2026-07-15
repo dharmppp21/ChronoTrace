@@ -18,9 +18,16 @@ from chronotrace.recorder.scope import Scope
 EXAMPLES = Path(__file__).parent.parent.parent / "examples"
 
 
-def _record(fn: Any) -> tuple[MemorySink, Recorder]:
+def _record(fn: Any, *, capture_values: bool = False) -> tuple[MemorySink, Recorder]:
+    """Record `fn`, control-flow only by default.
+
+    Day 7 turned value capture on by default, which is right for users and wrong
+    for this file: these tests pin the *control-flow* stream, and a VAR_WRITE per
+    local per line would bury the handwritten golden sequence a human is supposed
+    to be able to verify. tests/recorder/test_capture.py owns the value half.
+    """
     sink = MemorySink()
-    rec = Recorder(sink)
+    rec = Recorder(sink, capture_values=capture_values)
     with rec:
         fn()
     return sink, rec
@@ -280,3 +287,48 @@ def test_generator_frames_suspend_and_resume() -> None:
         elif e.kind is EventKind.RETURN:
             depth -= 1
     assert depth == 0, "generator frames leave the stack unbalanced"
+
+
+def test_values_are_captured_when_the_flag_is_on() -> None:
+    """The flag exists so days 40-41 can profile control flow and capture apart.
+
+    Day 3 measured value capture as the dominant cost (2,370x naive). Bolting it
+    in unconditionally would mean that when the combined figure disappoints, there
+    is no way to tell which half is at fault.
+    """
+
+    def run() -> int:
+        total = 7
+        return total
+
+    sink, _ = _record(run, capture_values=True)
+    writes = [e for e in sink.events if e.kind is EventKind.VAR_WRITE]
+    assert writes, "capture_values=True must emit VAR_WRITE events"
+    assert all(e.value_ref is not None for e in writes)
+    assert all(e.name_id is not None for e in writes)
+
+
+def test_control_flow_is_identical_with_and_without_capture() -> None:
+    """Capture must add events, never change which lines ran.
+
+    If turning capture on altered control flow, the recorder would be changing the
+    program it observes -- the failure the whole no-user-code rule exists to
+    prevent, showing up one layer higher.
+    """
+
+    def run() -> int:
+        total = 0
+        for i in range(3):
+            total += i
+        return total
+
+    def control_flow(sink: MemorySink, rec: Recorder) -> list[tuple[str, int]]:
+        return [
+            (e.kind.name, e.lineno)
+            for e in sink.events
+            if e.kind is not EventKind.VAR_WRITE and rec._codes.resolve(e.code_id) is run.__code__
+        ]
+
+    without = control_flow(*_record(run, capture_values=False))
+    with_values = control_flow(*_record(run, capture_values=True))
+    assert without == with_values

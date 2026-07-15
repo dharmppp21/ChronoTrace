@@ -125,6 +125,66 @@ Day 40 is the reckoning; this row is what it will be measured against.
 
 ---
 
+## Day 7 — the first honest end-to-end figure (hooks + capture)
+
+The `capture_values` flag exists precisely so these two columns can be separated.
+
+| workload | baseline | flow only | **+ capture** | events |
+|---|---:|---:|---:|---:|
+| tight_loop | 8.28 ms | 355.6× | **2577.1×** | 4,500,040 |
+| fib_recursive | 8.95 ms | 278.6× | **483.8×** | 900,324 |
+| json_pipeline | 16.61 ms | 127.4× | **4373.4×** | 3,168,757 |
+| io_bound | 155.52 ms | 1.0× | **1.0×** | 2,294 |
+
+**This is the planned catastrophe, not a surprise.** Day 3 measured naive capture
+on json_pipeline at 2,370× and wrote down why: a 1200-element list re-walked on
+every line though it never changed after line one. Today it is 4,373× — *worse*
+than the spike, because day 3 scoped to a single module while today's recorder
+scopes only against ChronoTrace itself, so `strptime` and `statistics` locals get
+captured too. 3.17M events against 195k flow-only: 16× more, one VAR_WRITE per
+local per line.
+
+Day 3 also measured the fix: change detection took the same workload to **6.1×**.
+That is day 8, and ADR-0001's whole yes rests on it.
+
+Two things are worth stating rather than glossing:
+
+* **This was built the slow way on purpose.** Shipping capture and dedup together
+  would mean that when the combined figure disappoints there is no way to tell
+  which half is at fault. `capture_values=False` isolates it from above; day 8
+  isolates it from below.
+* **io_bound is still 1.0×.** Instrumentation cost tracks Python lines executed,
+  not wall time — the day 2 claim survives contact with real capture.
+
+### Capture policy: the hole day 3's zoo never found
+
+`max_depth=6` × `max_items=100` permits 100⁶ = **10¹² nodes**. Depth and item
+limits bound each *dimension*; nothing bounded their product. A 20×20×20×20×20
+nested list — an ordinary shape, not a contrived one — measured at:
+
+    26,042 ms and 415,999,995 bytes   for ONE variable on ONE line
+
+Day 3's zoo had deep-and-narrow (10k × 1) and wide-and-shallow (10M × 1) and
+never wide-**and**-deep. `max_nodes=512` closes it; `tests/fixtures/hostile.py`
+now carries the case so it cannot reopen.
+
+### Day 7 micro-measurements
+
+| question | answer |
+|---|---|
+| dispatch: exact-type dict | **113 ns/value** |
+| dispatch: isinstance chain | 202 ns/value (1.8×) |
+| dispatch: `functools.singledispatch` | 322 ns/value (2.9×) |
+| frames added by recursive capture on a 10,000-deep dict | **7** |
+| user stack depth at which capture raises RecursionError | ~995 of 1000 |
+
+The last two killed the brief's demand for an iterative work stack: `max_depth`,
+not the data, bounds the stack. An iterative walk would move the cliff from ~995
+to ~998 — it does not solve deep-stack capture, it shifts it three frames, for
+much harder code.
+
+---
+
 ## Standing budgets
 
 | thing | budget | current | measured |

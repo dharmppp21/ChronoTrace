@@ -56,11 +56,14 @@ import time
 from types import CodeType, TracebackType
 from typing import Any
 
+from chronotrace.recorder.capture import DEFAULT_POLICY, CapturePolicy, capture
 from chronotrace.recorder.events import Event, EventKind
 from chronotrace.recorder.frames import FrameRegistry
+from chronotrace.recorder.identity import ObjectIdentity
 from chronotrace.recorder.interning import InternTable
 from chronotrace.recorder.scope import Scope
 from chronotrace.recorder.sink import Sink
+from chronotrace.recorder.values import ValuePool, ValueRef
 
 # Events that reject `DISABLE`. Measured, because the failure is silent.
 #
@@ -106,18 +109,30 @@ class Recorder:
     """
 
     __slots__ = (
+        "_capture_values",
         "_codes",
         "_dropped",
         "_exc_types",
         "_frames",
+        "_identity",
+        "_names",
+        "_policy",
         "_propagating",
         "_scope",
         "_seq",
         "_tool_id",
+        "_values",
         "sink",
     )
 
-    def __init__(self, sink: Sink, scope: Scope | None = None) -> None:
+    def __init__(
+        self,
+        sink: Sink,
+        scope: Scope | None = None,
+        *,
+        capture_values: bool = True,
+        policy: CapturePolicy = DEFAULT_POLICY,
+    ) -> None:
         """Build a recorder. Nothing is instrumented until `start()`.
 
         Args:
@@ -126,9 +141,20 @@ class Recorder:
             scope: which code to record. Defaults to "everything except
                 ChronoTrace itself". Injectable for tests; day 9 makes it
                 user-configurable.
+            capture_values: record local variable values, not just control flow.
+                A flag rather than a hard-coded truth because day 3 measured value
+                capture as the dominant cost (2,370x naive, 6.1x with change
+                detection), and days 40-41 need to profile the two halves apart.
+                Turning it off yields day 5's recorder exactly.
+            policy: what one captured value may cost. See `capture.CapturePolicy`.
         """
         self.sink = sink
         self._scope = scope if scope is not None else Scope()
+        self._capture_values = capture_values
+        self._policy = policy
+        self._identity = ObjectIdentity()
+        self._names: InternTable[str] = InternTable()
+        self._values = ValuePool()
         self._codes: InternTable[CodeType] = InternTable()
         self._exc_types: InternTable[str] = InternTable()
         self._seq = itertools.count()
@@ -213,10 +239,43 @@ class Recorder:
         try:
             if not self._scope.allows(code.co_filename):
                 return sys.monitoring.DISABLE
-            self._emit(EventKind.LINE, code, self._frames.current, line_number)
+            frame_id = self._frames.current
+            self._emit(EventKind.LINE, code, frame_id, line_number)
+            if self._capture_values:
+                self._capture_locals(code, frame_id, line_number)
         except Exception:
             self._dropped += 1
         return None
+
+    def _capture_locals(self, code: CodeType, frame_id: int, line_number: int) -> None:
+        """Emit a VAR_WRITE per local. Every local, every line -- for now.
+
+        Day 3 measured exactly this at **2,370x** on a realistic workload: a
+        1200-element list re-walked on all 13,210 lines though it never changed
+        after line one. Day 8 adds change detection, which took the same workload
+        to 6.1x and is the only reason ADR-0001 could say yes.
+
+        This is therefore deliberately the slow version, and it is not a shortcut:
+        writing dedup today would mean shipping capture and dedup together, and
+        when the combined figure disappointed there would be no way to tell which
+        half was at fault. `capture_values=False` isolates it from above; day 8
+        isolates it from below.
+        """
+        frame = sys._getframe(2)
+        for name, value in frame.f_locals.items():
+            self.sink.emit(
+                Event(
+                    seq=next(self._seq),
+                    kind=EventKind.VAR_WRITE,
+                    timestamp_ns=time.perf_counter_ns(),
+                    thread_id=threading.get_ident(),
+                    frame_id=frame_id,
+                    code_id=self._codes.intern(code),
+                    lineno=line_number,
+                    name_id=self._names.intern(name),
+                    value_ref=self._values.add(capture(value, self._policy, self._identity)),
+                )
+            )
 
     def _on_start(self, code: CodeType, instruction_offset: int) -> Any:
         try:
@@ -336,7 +395,10 @@ class Recorder:
         frame_id: int,
         lineno: int,
         exc_type_id: int | None = None,
+        name_id: int | None = None,
+        value_ref: ValueRef | None = None,
     ) -> None:
+        """The one place an Event is built. Every callback routes through here."""
         self.sink.emit(
             Event(
                 seq=next(self._seq),
@@ -347,6 +409,8 @@ class Recorder:
                 code_id=self._codes.intern(code),
                 lineno=lineno,
                 exc_type_id=exc_type_id,
+                name_id=name_id,
+                value_ref=value_ref,
             )
         )
 
