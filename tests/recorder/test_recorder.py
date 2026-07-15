@@ -256,7 +256,7 @@ def test_scope_can_be_injected() -> None:
     assert sink.events == [], "an all-excluding scope must record nothing"
 
 
-@pytest.mark.skip(reason="day 6: generators break the stack model; frame registry replaces it")
+# un-skipped on day 6: the frame registry makes this pass
 def test_generator_frames_suspend_and_resume() -> None:
     """A generator's frame leaves without returning and re-enters later.
 

@@ -70,14 +70,38 @@ class EventKind(enum.IntEnum):
     """A frame returned normally. Powers the call tree."""
 
     RAISE = 4
-    """An exception was raised *here*. This is its origin (day 29)."""
+    """An exception was born here. **Origins only.**
+
+    Day 6 correction, from measurement: CPython's `RAISE` event fires in *every*
+    frame an exception passes through, not only where it started. An exception
+    crossing three frames produces::
+
+        RAISE boom   <- origin
+        UNWIND boom
+        RAISE mid    <- same exception, re-reported
+        UNWIND mid
+        RAISE outer  <- again
+        HANDLED outer
+
+    Day 4's docstring claimed `RAISE` meant "the origin". It did not, and day 29's
+    flagship query ("where did this exception come from?") would have pointed at
+    whichever frame the user was already looking at.
+
+    The recorder therefore emits `RAISE` only for the **first** sighting of an
+    exception object and suppresses the rest. Nothing is lost: propagation is
+    fully described by `UNWIND` (a frame exited because of it) and
+    `EXCEPTION_HANDLED` (where it stopped). A non-origin `RAISE` carries no
+    information those two lack, and this is the hot path.
+    """
 
     UNWIND = 5
     """A frame is exiting *because of* an exception -- propagation, not origin.
 
-    Distinct from RAISE deliberately. Conflating them makes "jump to where this
-    exception came from" point at whichever frame happened to be on top, which is
-    the frame the user is already looking at and least needs to find.
+    A separate kind rather than a flag on RETURN. Day 27's call-tree index stores
+    `exit_kind` per frame and colours abnormal exits, and the difference between
+    "returned" and "blew up" is the single most useful thing a call tree can show.
+    Two kinds keep that a column comparison rather than a bitmask test, and keep
+    the columnar encoder (day 12) packing one small int.
     """
 
     EXCEPTION_HANDLED = 6
@@ -129,6 +153,12 @@ class Event:
         name_id: interned variable name. VAR_WRITE only; None elsewhere.
         value_ref: the new value. VAR_WRITE only; None elsewhere. An event never
             embeds a value -- see `values.py` for why the indirection matters.
+        exc_type_id: interned exception type name (`"ValueError"`). RAISE, UNWIND
+            and EXCEPTION_HANDLED only; None elsewhere. The *type* rather than the
+            exception object because a type name is a short repeated string that
+            interns to a small int, which is exactly what day 12's columnar
+            encoder wants. The message is a value and belongs to day 7's capture,
+            not to a second string field here.
     """
 
     seq: int
@@ -140,3 +170,4 @@ class Event:
     lineno: int = 0
     name_id: int | None = None
     value_ref: ValueRef | None = None
+    exc_type_id: int | None = None

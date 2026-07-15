@@ -35,14 +35,16 @@ Known fidelity gaps (dated, not forgotten)
 * **C functions emit no LINE events.** `json.loads`, `re.match` and numpy run
   their real work in C, so a recording shows the call and nothing inside it. This
   is inherent to PEP 669's Python-level events, not a bug we can fix.
-* **Generators break the stack model** (day 6). `PY_START` fires once, but the
-  frame suspends at `YIELD` and re-enters at `RESUME` without a matching
-  `PY_RETURN`. Today's stack silently mis-nests them. `test_recorder.py` carries a
-  skipped test naming this; day 6 replaces the stack with a live-frame registry.
-* **Exceptions unwind frames without `PY_RETURN`** (day 6), so the stack leaks a
-  frame per uncaught exception. Same fix.
+* **Threads share one `seq` clock but not one stack.** The frame registry is
+  per-thread for execution order and process-wide for identity; a generator
+  created on one thread and resumed on another keeps its id. Untested under real
+  contention beyond `test_events.py`'s seq test -- day 10 exercises it.
 * **Values are not captured** (day 7). Today records control flow only, so that
   when something breaks it is obvious which half broke.
+
+Closed on day 6: generators and coroutines now keep one `frame_id` across their
+whole life (see `frames.py`), exceptions unwind without leaking frames, and
+`RAISE` marks origins only.
 """
 
 from __future__ import annotations
@@ -55,9 +57,29 @@ from types import CodeType, TracebackType
 from typing import Any
 
 from chronotrace.recorder.events import Event, EventKind
+from chronotrace.recorder.frames import FrameRegistry
 from chronotrace.recorder.interning import InternTable
 from chronotrace.recorder.scope import Scope
 from chronotrace.recorder.sink import Sink
+
+# Events that reject `DISABLE`. Measured, because the failure is silent.
+#
+# Returning `sys.monitoring.DISABLE` from these raises
+# ``ValueError: Cannot disable X events. Callback removed.`` -- and the message is
+# not a warning, it is a description: **CPython unregisters the callback**. A
+# recorder that did this would stop recording exceptions and never say so.
+#
+# `LINE`, `PY_START`, `PY_RESUME`, `PY_YIELD`, `PY_RETURN` and `RERAISE` all accept
+# it. The three that do not are exactly the exception events, which makes sense:
+# `DISABLE` de-instruments a *code location*, and an exception is not a location --
+# it can arrive at any instruction.
+#
+# The consequence for day 9's scope filter is real and worth stating: scoping makes
+# out-of-scope code stop calling us for LINE/CALL/RETURN, but exception events keep
+# firing for the entire process forever. The out-of-scope exception callbacks
+# therefore return `None` and emit nothing -- we pay the call and drop the result.
+# Exceptions are rare next to lines, so the cost is small, but it is not zero and it
+# cannot be optimised away.
 
 _TOOL_PREFERENCE = (sys.monitoring.DEBUGGER_ID, 3, 4)
 """Ids to try, in order.
@@ -67,29 +89,6 @@ first, then falls back to the two general-purpose ids. It never takes an id
 another tool holds: a debugger that evicts coverage.py mid-run has broken
 somebody else's session to run its own.
 """
-
-_NO_FRAME = 0
-"""Frame id for events whose frame we never saw start.
-
-Recording can begin mid-execution, so LINE events arrive for frames that were
-already on the stack. They are real events and belong in the timeline; only their
-parentage is unknown. Dropping them would lose real history to protect a bookkeeping
-invariant.
-"""
-
-
-class _ThreadState(threading.local):
-    """Per-thread frame stack.
-
-    `sys.monitoring.set_events` is process-global: callbacks fire on every thread.
-    One shared stack would interleave threads' frames into nonsense, so the stack
-    is thread-local. `threading.local` costs an attribute lookup per event, which
-    is the price of being correct under threads from day one rather than
-    discovering it later.
-    """
-
-    def __init__(self) -> None:
-        self.stack: list[int] = []
 
 
 class Recorder:
@@ -109,10 +108,11 @@ class Recorder:
     __slots__ = (
         "_codes",
         "_dropped",
+        "_exc_types",
         "_frames",
+        "_propagating",
         "_scope",
         "_seq",
-        "_state",
         "_tool_id",
         "sink",
     )
@@ -130,11 +130,16 @@ class Recorder:
         self.sink = sink
         self._scope = scope if scope is not None else Scope()
         self._codes: InternTable[CodeType] = InternTable()
+        self._exc_types: InternTable[str] = InternTable()
         self._seq = itertools.count()
-        self._frames = itertools.count(1)  # 0 is _NO_FRAME
-        self._state = _ThreadState()
+        self._frames = FrameRegistry()
         self._tool_id: int | None = None
         self._dropped = 0
+        # id() of the exception currently propagating, so that RAISE fires only
+        # where an exception is BORN. CPython re-fires RAISE in every frame it
+        # crosses; see EventKind.RAISE. Safe to key on id() because the object is
+        # alive for the whole propagation -- the frames it is unwinding hold it.
+        self._propagating: int | None = None
 
     @property
     def dropped(self) -> int:
@@ -163,13 +168,9 @@ class Recorder:
             )
         self._tool_id = self._acquire_tool_id()
         mon = sys.monitoring
-        mon.register_callback(self._tool_id, mon.events.LINE, self._on_line)
-        mon.register_callback(self._tool_id, mon.events.PY_START, self._on_start)
-        mon.register_callback(self._tool_id, mon.events.PY_RETURN, self._on_return)
-        mon.set_events(
-            self._tool_id,
-            mon.events.LINE | mon.events.PY_START | mon.events.PY_RETURN,
-        )
+        for event, callback in self._callbacks():
+            mon.register_callback(self._tool_id, event, callback)
+        mon.set_events(self._tool_id, self._event_mask())
 
     def stop(self) -> None:
         """Stop recording, release the tool id, close the sink. Idempotent.
@@ -185,7 +186,7 @@ class Recorder:
         mon = sys.monitoring
         try:
             mon.set_events(tool_id, 0)
-            for event in (mon.events.LINE, mon.events.PY_START, mon.events.PY_RETURN):
+            for event, _ in self._callbacks():
                 mon.register_callback(tool_id, event, None)
         finally:
             # Nested finally: if de-registration fails we still must not leak the
@@ -212,8 +213,7 @@ class Recorder:
         try:
             if not self._scope.allows(code.co_filename):
                 return sys.monitoring.DISABLE
-            stack = self._state.stack
-            self._emit(EventKind.LINE, code, stack[-1] if stack else _NO_FRAME, line_number)
+            self._emit(EventKind.LINE, code, self._frames.current, line_number)
         except Exception:
             self._dropped += 1
         return None
@@ -222,9 +222,34 @@ class Recorder:
         try:
             if not self._scope.allows(code.co_filename):
                 return sys.monitoring.DISABLE
-            frame_id = next(self._frames)
-            self._state.stack.append(frame_id)
+            frame_id = self._frames.enter(sys._getframe(1))
             self._emit(EventKind.CALL, code, frame_id, code.co_firstlineno)
+        except Exception:
+            self._dropped += 1
+        return None
+
+    def _on_resume(self, code: CodeType, instruction_offset: int) -> Any:
+        """A generator or coroutine re-entered.
+
+        `enter` recovers the *same* frame_id assigned at PY_START. That recovery is
+        the entire reason frames.py exists.
+        """
+        try:
+            if not self._scope.allows(code.co_filename):
+                return sys.monitoring.DISABLE
+            frame_id = self._frames.enter(sys._getframe(1))
+            self._emit(EventKind.RESUME, code, frame_id, code.co_firstlineno)
+        except Exception:
+            self._dropped += 1
+        return None
+
+    def _on_yield(self, code: CodeType, instruction_offset: int, retval: object) -> Any:
+        """A generator suspended: it stops executing but stays alive."""
+        try:
+            if not self._scope.allows(code.co_filename):
+                return sys.monitoring.DISABLE
+            frame_id = self._frames.suspend(sys._getframe(1))
+            self._emit(EventKind.YIELD, code, frame_id, code.co_firstlineno)
         except Exception:
             self._dropped += 1
         return None
@@ -233,16 +258,85 @@ class Recorder:
         try:
             if not self._scope.allows(code.co_filename):
                 return sys.monitoring.DISABLE
-            stack = self._state.stack
-            # Underflow is expected, not exceptional: recording can start
-            # mid-execution, so frames return that we never saw start.
-            frame_id = stack.pop() if stack else _NO_FRAME
+            frame_id = self._frames.exit(sys._getframe(1))
             self._emit(EventKind.RETURN, code, frame_id, code.co_firstlineno)
         except Exception:
             self._dropped += 1
         return None
 
-    def _emit(self, kind: EventKind, code: CodeType, frame_id: int, lineno: int) -> None:
+    def _on_raise(self, code: CodeType, instruction_offset: int, exception: BaseException) -> Any:
+        """An exception surfaced. Emits only where it was BORN.
+
+        CPython re-fires RAISE in every frame the exception crosses. Emitting all
+        of them would make day 29's "where did this come from?" point at the frame
+        the user is already looking at.
+        """
+        try:
+            if not self._scope.allows(code.co_filename):
+                return None  # NOT DISABLE: this event rejects it (see the note above)
+            exc_id = id(exception)
+            if exc_id == self._propagating:
+                return None  # same exception, one frame further up: not an origin
+            self._propagating = exc_id
+            self._emit(
+                EventKind.RAISE,
+                code,
+                self._frames.id_of(sys._getframe(1)),
+                code.co_firstlineno,
+                exc_type_id=self._exc_types.intern(type(exception).__name__),
+            )
+        except Exception:
+            self._dropped += 1
+        return None
+
+    def _on_unwind(self, code: CodeType, instruction_offset: int, exception: BaseException) -> Any:
+        """A frame is exiting because of an exception.
+
+        Pops like PY_RETURN but stays a distinct kind. Treating it as a normal
+        return would tell day 27's call tree that a frame which blew up finished
+        cleanly -- erasing the most useful thing a call tree shows. Not popping at
+        all would leak a frame per exception, forever.
+        """
+        try:
+            if not self._scope.allows(code.co_filename):
+                return None  # NOT DISABLE: this event rejects it (see the note above)
+            frame_id = self._frames.exit(sys._getframe(1))
+            self._emit(
+                EventKind.UNWIND,
+                code,
+                frame_id,
+                code.co_firstlineno,
+                exc_type_id=self._exc_types.intern(type(exception).__name__),
+            )
+        except Exception:
+            self._dropped += 1
+        return None
+
+    def _on_handled(self, code: CodeType, instruction_offset: int, exception: BaseException) -> Any:
+        """An exception was caught. Bounds the unwind and ends the propagation."""
+        try:
+            if not self._scope.allows(code.co_filename):
+                return None  # NOT DISABLE: this event rejects it (see the note above)
+            self._propagating = None
+            self._emit(
+                EventKind.EXCEPTION_HANDLED,
+                code,
+                self._frames.id_of(sys._getframe(1)),
+                code.co_firstlineno,
+                exc_type_id=self._exc_types.intern(type(exception).__name__),
+            )
+        except Exception:
+            self._dropped += 1
+        return None
+
+    def _emit(
+        self,
+        kind: EventKind,
+        code: CodeType,
+        frame_id: int,
+        lineno: int,
+        exc_type_id: int | None = None,
+    ) -> None:
         self.sink.emit(
             Event(
                 seq=next(self._seq),
@@ -252,8 +346,34 @@ class Recorder:
                 frame_id=frame_id,
                 code_id=self._codes.intern(code),
                 lineno=lineno,
+                exc_type_id=exc_type_id,
             )
         )
+
+    def _callbacks(self) -> tuple[tuple[int, Any], ...]:
+        """The event-to-handler wiring, in one place.
+
+        Registration and teardown both walk this, so a new event cannot be
+        registered and then forgotten on the release path -- which would leave a
+        dangling callback on a tool id we no longer own.
+        """
+        e = sys.monitoring.events
+        return (
+            (e.LINE, self._on_line),
+            (e.PY_START, self._on_start),
+            (e.PY_RESUME, self._on_resume),
+            (e.PY_YIELD, self._on_yield),
+            (e.PY_RETURN, self._on_return),
+            (e.RAISE, self._on_raise),
+            (e.PY_UNWIND, self._on_unwind),
+            (e.EXCEPTION_HANDLED, self._on_handled),
+        )
+
+    def _event_mask(self) -> int:
+        mask = 0
+        for event, _ in self._callbacks():
+            mask |= event
+        return mask
 
     def _acquire_tool_id(self) -> int:
         mon = sys.monitoring
