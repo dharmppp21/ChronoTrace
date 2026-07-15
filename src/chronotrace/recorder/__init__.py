@@ -8,8 +8,14 @@ line of their program.
 
 Public surface
 --------------
-Filled in during Phase 1 (days 4-10). Today this package is an empty shell that
-exists to pin the layer boundary before any code can violate it.
+Exported below and nothing else. A small public API is a maintenance asset, not
+modesty: everything named here is a promise to every layer above, and a promise
+is expensive to withdraw. `InternTable` and `ValuePool` stay unexported -- they
+are how the recorder does its job, not what it offers. Import them by their full
+path if you genuinely need them; the friction is the point.
+
+The rest of Phase 1 (days 5-10) adds the `Recorder` itself, frame tracking, value
+capture and scope filtering.
 
 What this package must NEVER import
 -----------------------------------
@@ -21,3 +27,9 @@ defines a ``Sink`` protocol; day 12 adds the file-backed implementation), and it
 must not know that a storage format exists at all. If the recorder ever needs to
 know how bytes reach disk, the abstraction has failed.
 """
+
+from chronotrace.recorder.events import Event, EventKind
+from chronotrace.recorder.sink import MemorySink, Sink
+from chronotrace.recorder.values import ValueRef
+
+__all__ = ["Event", "EventKind", "MemorySink", "Sink", "ValueRef"]
