@@ -6,6 +6,13 @@ will tolerate?
 **Answer: yes, comfortably — but not for the reason we assumed.** Two findings
 contradict the premise this project was scoped on. Both are load-bearing.
 
+> **Read this with [RESULTS-capture.md](RESULTS-capture.md).** Every number below
+> measures a callback that counts or appends a tuple. **That is not recording.**
+> Day 3 added real value capture and the realistic workload went from 1.5x to
+> **2,370x** — rescued to **6.1x** only by change detection. The figures here are
+> a *floor*, and quoting the 1.5x as ChronoTrace's overhead would be dishonest.
+> Combined figures: [RESULTS-capture.md#7-the-combined-figure--the-number-that-matters](RESULTS-capture.md).
+
 ---
 
 ## Environment

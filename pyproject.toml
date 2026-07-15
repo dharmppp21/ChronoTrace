@@ -124,13 +124,14 @@ convention = "google"
 # The relaxations are narrow and each has a reason:
 #   T20   -- print IS the harness's output mechanism
 #   S603/S607 -- it shells out to itself deliberately, for process isolation
-#   D103  -- module and function docstrings that carry reasoning are still
-#            required; only trivial per-runner docstrings are exempt
+#   D102/D103/D105/D107 -- module and CLASS docstrings still required, because
+#            those carry the reasoning. Per-method and __init__ docstrings on
+#            fixture classes would be noise ("initialises the object").
 #
 # Note what is NOT relaxed: correctness rules (F, B, E) still apply. A spike may
 # be scrappy; it may not be wrong, because we are about to bet the architecture
 # on its output.
-"spikes/**" = ["T20", "S603", "S607", "D103"]
+"spikes/**" = ["T20", "S603", "S607", "D102", "D103", "D105", "D107"]
 
 # ---------------------------------------------------------------------------
 # Types
