@@ -42,7 +42,7 @@ the project: read in order, it explains how each decision forced the next.
 
 | # | Decision | Status |
 |---|---|---|
-| — | *(none yet — 0001 lands on day 3)* | |
+| [0001](0001-recording-strategy.md) | Omniscient recording, not deterministic replay | Accepted |
 
 ## Baseline decisions not recorded here
 
