@@ -107,6 +107,14 @@ select = [
 ignore = [
     "D203",  # conflicts with D211 (we use "no blank line before class docstring")
     "D213",  # conflicts with D212 (we use "summary on first line")
+    # D105/D107 would demand docstrings on __init__ and dunders. On the classes we
+    # write those are trivial (`return len(self._values)`), so the docstring could
+    # only restate the signature -- which CONTRIBUTING.md bans outright ("comments
+    # explain why, never what"). The class docstring carries the contract; that is
+    # the place a reader looks. Non-trivial dunders still get one; nothing stops
+    # them.
+    "D105",  # missing docstring in magic method
+    "D107",  # missing docstring in __init__
 ]
 
 [tool.ruff.lint.pydocstyle]
@@ -115,6 +123,13 @@ convention = "google"
 [tool.ruff.lint.per-file-ignores]
 # Asserts ARE the test; docstrings on every test function are noise.
 "tests/**" = ["S101", "D"]
+
+# Benchmarks are measurement scripts, not library code: print IS their output, and
+# the reasoning lives in module docstrings and benchmarks/RESULTS.md rather than on
+# each throwaway variant class. Same rationale as spikes/ below, different lifetime
+# -- these are kept and re-run (day 43 consolidates them), so correctness rules
+# still apply in full.
+"benchmarks/**" = ["T20", "D101", "D102", "D103"]
 
 # Spikes are throwaway by design (see spikes/README.md). They get a lighter
 # standard because their deliverable is a RESULTS-*.md file, not code that
