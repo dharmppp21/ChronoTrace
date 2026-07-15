@@ -29,7 +29,8 @@ know how bytes reach disk, the abstraction has failed.
 """
 
 from chronotrace.recorder.events import Event, EventKind
+from chronotrace.recorder.recorder import Recorder
 from chronotrace.recorder.sink import MemorySink, Sink
 from chronotrace.recorder.values import ValueRef
 
-__all__ = ["Event", "EventKind", "MemorySink", "Sink", "ValueRef"]
+__all__ = ["Event", "EventKind", "MemorySink", "Recorder", "Sink", "ValueRef"]
