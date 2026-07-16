@@ -185,14 +185,83 @@ much harder code.
 
 ---
 
+## Day 8 — dedup + change detection (`bench_dedup.py`)
+
+Content-addressed deduplication (store each distinct value once) plus change
+detection (emit a VAR_WRITE only when a binding's value reference actually
+changed). Both are the same idea — record deltas, not restatements — and both are
+measured here. Accounting is one deterministic run; overhead is median/p95 of 5.
+
+### Recording size — the headline
+
+**dedup + change detection cut recording size by 97.9% on the realistic workload
+(json_pipeline) and 84% on the tight loop.**
+
+| workload | captures | VAR_WRITE emitted | hit rate | distinct stored | **size cut** |
+|---|---:|---:|---:|---:|---:|
+| tight_loop | 3,750,013 | 600,008 | 92.4% | 286,371 | **84.2%** |
+| fib_recursive | 300,106 | 150,055 | 100.0% | **31** | 50.3% |
+| json_pipeline | 3,220,015 | 98,261 | 99.6% | 14,036 | **97.9%** |
+| io_bound | 1,817 | 309 | 91.3% | 158 | 78.0% |
+
+*captures* = every (local, line) fed to the pool. *emitted* = VAR_WRITE events
+that survived change detection. *hit rate* = fraction of captures whose content
+was already pooled. *size* = `events x 151 B` (day 4) `+ serialised value bytes`,
+naive (day 7: one event and one stored value per capture) against now.
+
+* **json_pipeline is the win.** A 1200-record parse re-reads the same
+  `records`/`parsed` lists on every line; 3.22M captures collapse to 14,036
+  distinct values (99.6% hit rate), and change detection drops 3.22M would-be
+  VAR_WRITEs to 98,261. 97.9% smaller.
+* **fib_recursive dedups perfectly (31 distinct values) yet only shrinks 50%.**
+  Its frames read `n` once and return, so change detection has almost nothing to
+  suppress — the events are already minimal; only storage dedups. A workload
+  where each local is read once is the case change detection cannot help.
+
+### Overhead — size fell far more than time, and that is the honest result
+
+| workload | day 7 (+capture) | **day 8 median** | day 8 p95 |
+|---|---:|---:|---:|
+| tight_loop | 2577.1x | **1268.2x** | 1327.1x |
+| fib_recursive | 483.8x | **440.1x** | 465.1x |
+| json_pipeline | 4373.4x | **2858.9x** | 128845.8x † |
+| io_bound | 1.0x | **1.0x** | 1.1x |
+
+Size fell 84–98%; time fell only ~1.5–2x. That gap is the finding, not a
+disappointment: **change detection deduplicates *emission and storage*, but the
+`capture()` + hash still runs on every local every line** — 3.22M times on
+json_pipeline — because a mutable object could have changed and only a re-capture
+can prove it didn't. Emission and storage were never the floor; the per-line
+capture is. Cutting the *number* of captures is day 9's job — scope filtering
+stops capturing `strptime`/`statistics` locals at all, which is where
+json_pipeline's 3.22M captures actually come from.
+
+**Day 3's 6.1x was a scoped spike, and this is why it is not repeated here.** That
+number captured one module's locals; unscoped, json_pipeline is 2858.9x. Day 8
+was never going to reach 6.1x soundly — that needs either the `id()` shortcut this
+day rejected as unsound (see `dedup.py`) or day 9's scoping. The standing-budget
+footnote is corrected below to stop implying day 8 delivers 6.1x.
+
+† **The p95 is a gen-2 GC pause, and it is real signal.** One of five
+json_pipeline runs took ~45x the median because the recorder mints *millions* of
+short-lived capture dicts (3.22M here), and a full collection mid-recording adds
+seconds. The median is robust to it (middle of five); the p95 is not, and it is
+left in rather than hidden because it flags a day-40 question: whether to
+`gc.freeze()` the target's heap or throttle collection while recording. A user
+whose 16 ms program occasionally pauses 2 s will notice.
+
+---
+
 ## Standing budgets
 
 | thing | budget | current | measured |
 |---|---:|---:|---|
 | 1M events in `MemorySink` | day 10 sets it | 151 MB | day 4 |
-| Recorder overhead, realistic workload | < 20x (ADR-0001 reversal trigger) | 6.1x* | day 3 |
-| Recorder overhead, tight loop | — | 107x | day 3 |
+| Recording size, realistic workload | smaller is better | −97.9% | day 8 |
+| Recorder overhead, realistic workload | < 20x (ADR-0001 reversal trigger) | 2859x* | day 8 |
+| Recorder overhead, tight loop | — | 1268x | day 8 |
 
-\* with change detection whose sound version is unsolved — see
-[`spikes/RESULTS-capture.md`](../spikes/RESULTS-capture.md). 6.1x is a ceiling, not
-a promise.
+\* Still far above the trigger, and honestly so: day 8 crushed recording *size*,
+not *time*. The per-line `capture()` + hash is now the floor, and day 9's scope
+filter is what removes it (the 3.22M captures are mostly out-of-scope stdlib
+locals). Day 3's scoped 6.1x is not an unscoped promise — see the day 8 section.
