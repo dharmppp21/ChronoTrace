@@ -252,16 +252,75 @@ whose 16 ms program occasionally pauses 2 s will notice.
 
 ---
 
+## Day 9 — scope filtering via DISABLE (`bench_scope.py`)
+
+Returning `sys.monitoring.DISABLE` for out-of-scope code so CPython stops calling
+us there. Measured flow-only (capture off) so the number is the *scoping* win, not
+the capture cost day 8 already showed dominates. Each workload is run under the
+shipped narrow scope (record the project tree, exclude stdlib + site-packages) and
+under a wide scope (everything but ChronoTrace, day 8's behaviour).
+
+| workload | wide x | wide events | **narrow x** | **narrow events** | event cut |
+|---|---:|---:|---:|---:|---:|
+| tight_loop | 103.1x | 750,007 | 102.5x | 750,007 | 0.0% |
+| fib_recursive | 285.5x | 600,198 | 315.7x | 600,198 | 0.0% |
+| **json_pipeline** | **179.8x** | **195,776** | **5.4x** | **13,214** | **93.3%** |
+| io_bound | 1.0x | 457 | 1.0x | 457 | 0.0% |
+
+**json_pipeline goes 179.8x -> 5.4x, and its flow event count 195,776 -> 13,214.**
+That is a 33x overhead cut on the realistic workload, and it drops the flow stream
+*under* ADR-0001's 20x reversal trigger. It comes entirely from `DISABLE`:
+`strptime` and `statistics` run thousands of pure-Python lines that are no longer
+recorded.
+
+**The pure-Python loops are unchanged, and that is the control.** `tight_loop`,
+`fib` and `io_bound` have nothing out of scope, so scoping cannot and does not help
+them (0.0% cut; the fib row's 285.5 vs 315.7 is run-to-run noise -- identical event
+counts). Scoping is not a universal speedup; it removes the stdlib, which is where
+real programs -- and only real programs -- spend out-of-scope time. A benchmark
+that claimed a tight-loop speedup from scoping would be measuring noise.
+
+### DISABLE stops the call, not just the event
+
+`test_scope_filter.py::test_disable_stops_the_callback_for_out_of_scope_code`
+counts callback invocations: a 3-line function called 50 times fires the LINE
+callback >= 50x in scope and <= 4x out of scope (each line's location returns
+DISABLE on first sight and is never called again). Asserted directly, because
+"cheap per event" and "no event" are different claims and only the second is the
+point.
+
+### Capture is now the floor -- a day-40 problem, not scope's
+
+With value capture on, scoped `json_pipeline` still takes ~35 s per run: scoping
+cut its captures 3,220,015 -> 55,240 (58x fewer), but the survivors are the
+expensive ones -- `records` (1,200 dicts) and `parsed`, re-captured every loop
+line. Measured, so day 40 has a target and not a hunch:
+
+| operation (a 1,200-dict list, bounded to 512 nodes) | cost |
+|---|---:|
+| `capture()` | 827 us |
+| `digest()` (repr + blake2b) | 249 us |
+| of which `repr()` | 207 us |
+
+`capture()` at ~1.6 us/node is the whole cost; identity assignment adds only 30 us
+(so day 8's weakref design is not the problem). This is the same per-value cost day
+8 flagged; scoping reduced how *often* it is paid, not the price. Lowering it is
+day 40's job (a faster serialisation than `repr`, and a capturer that does less per
+node).
+
+---
+
 ## Standing budgets
 
 | thing | budget | current | measured |
 |---|---:|---:|---|
 | 1M events in `MemorySink` | day 10 sets it | 151 MB | day 4 |
 | Recording size, realistic workload | smaller is better | −97.9% | day 8 |
-| Recorder overhead, realistic workload | < 20x (ADR-0001 reversal trigger) | 2859x* | day 8 |
-| Recorder overhead, tight loop | — | 1268x | day 8 |
+| Recorder overhead, realistic workload, **flow** | < 20x (ADR-0001 trigger) | **5.4x** | day 9 |
+| Recorder overhead, realistic workload, +capture | < 20x eventually | ~2100x* | day 9 |
+| Recorder overhead, tight loop, flow | — | 102x | day 9 |
 
-\* Still far above the trigger, and honestly so: day 8 crushed recording *size*,
-not *time*. The per-line `capture()` + hash is now the floor, and day 9's scope
-filter is what removes it (the 3.22M captures are mostly out-of-scope stdlib
-locals). Day 3's scoped 6.1x is not an unscoped promise — see the day 8 section.
+\* The **flow** stream now clears the trigger: scoping (day 9) took realistic
+flow-only overhead to 5.4x. With value capture on it is still ~2100x, and that
+remaining cost is `capture()` itself (827 us per big value, day 9 table above),
+not scope or event volume -- day 40's optimisation target, isolated and measured.
