@@ -39,8 +39,14 @@ Known fidelity gaps (dated, not forgotten)
   per-thread for execution order and process-wide for identity; a generator
   created on one thread and resumed on another keeps its id. Untested under real
   contention beyond `test_events.py`'s seq test -- day 10 exercises it.
-* **Values are not captured** (day 7). Today records control flow only, so that
-  when something breaks it is obvious which half broke.
+* **Abandoned generators leak one change-detection entry.** A generator that
+  suspends and is never resumed to completion keeps its `_last_ref` slot until the
+  process ends -- bounded by the number of such generators, the same shape of gap
+  as the frame registry's own.
+
+Closed on day 8: locals are captured (day 7) and deduplicated on content, and a
+VAR_WRITE fires only when a binding's value actually changed. `capture_values` is
+still a flag so days 40-41 can profile control flow and values apart.
 
 Closed on day 6: generators and coroutines now keep one `frame_id` across their
 whole life (see `frames.py`), exceptions unwind without leaking frames, and
@@ -115,6 +121,7 @@ class Recorder:
         "_exc_types",
         "_frames",
         "_identity",
+        "_last_ref",
         "_names",
         "_policy",
         "_propagating",
@@ -161,6 +168,12 @@ class Recorder:
         self._frames = FrameRegistry()
         self._tool_id: int | None = None
         self._dropped = 0
+        # Per-frame change-detection: frame_id -> {name_id -> last ValueRef}.
+        # A VAR_WRITE fires only when a binding's ref actually changed, so the
+        # stream carries deltas, not a full re-statement of every local on every
+        # line. Dropped whole-frame on RETURN/UNWIND so it stays bounded by live
+        # frames rather than growing one entry per (frame, local) forever.
+        self._last_ref: dict[int, dict[int, ValueRef]] = {}
         # id() of the exception currently propagating, so that RAISE fires only
         # where an exception is BORN. CPython re-fires RAISE in every frame it
         # crosses; see EventKind.RAISE. Safe to key on id() because the object is
@@ -248,33 +261,32 @@ class Recorder:
         return None
 
     def _capture_locals(self, code: CodeType, frame_id: int, line_number: int) -> None:
-        """Emit a VAR_WRITE per local. Every local, every line -- for now.
+        """Emit a VAR_WRITE only for locals whose value actually changed.
 
-        Day 3 measured exactly this at **2,370x** on a realistic workload: a
-        1200-element list re-walked on all 13,210 lines though it never changed
-        after line one. Day 8 adds change detection, which took the same workload
-        to 6.1x and is the only reason ADR-0001 could say yes.
+        This is the delta-encoding of Phase 2 starting early, and it must live
+        here rather than in the store: the store sees only Events and cannot know
+        a local *didn't* change without being told, while the recorder is the only
+        layer that ever sees `f_locals` and can compare. So the recorder omits the
+        non-change; reconstruct later carries the last VAR_WRITE forward.
 
-        This is therefore deliberately the slow version, and it is not a shortcut:
-        writing dedup today would mean shipping capture and dedup together, and
-        when the combined figure disappointed there would be no way to tell which
-        half was at fault. `capture_values=False` isolates it from above; day 8
-        isolates it from below.
+        Every local is re-captured every line -- no identity shortcut, because a
+        mutable object mutated in place keeps its `id()` (see dedup.py). Capture is
+        bounded, dedup collapses the repeats to one reference, and an unchanged
+        reference emits nothing. Day 3 measured the naive always-emit version at
+        **2,370x** on json_pipeline; this is the fix.
         """
         frame = sys._getframe(2)
+        last = self._last_ref.get(frame_id)
+        if last is None:
+            last = self._last_ref[frame_id] = {}
         for name, value in frame.f_locals.items():
-            self.sink.emit(
-                Event(
-                    seq=next(self._seq),
-                    kind=EventKind.VAR_WRITE,
-                    timestamp_ns=time.perf_counter_ns(),
-                    thread_id=threading.get_ident(),
-                    frame_id=frame_id,
-                    code_id=self._codes.intern(code),
-                    lineno=line_number,
-                    name_id=self._names.intern(name),
-                    value_ref=self._values.add(capture(value, self._policy, self._identity)),
-                )
+            name_id = self._names.intern(name)
+            ref = self._values.add(capture(value, self._policy, self._identity))
+            if last.get(name_id) == ref:
+                continue  # unchanged since we last saw this binding: record nothing
+            last[name_id] = ref
+            self._emit(
+                EventKind.VAR_WRITE, code, frame_id, line_number, name_id=name_id, value_ref=ref
             )
 
     def _on_start(self, code: CodeType, instruction_offset: int) -> Any:
@@ -318,6 +330,7 @@ class Recorder:
             if not self._scope.allows(code.co_filename):
                 return sys.monitoring.DISABLE
             frame_id = self._frames.exit(sys._getframe(1))
+            self._last_ref.pop(frame_id, None)  # frame gone: drop its change-detection state
             self._emit(EventKind.RETURN, code, frame_id, code.co_firstlineno)
         except Exception:
             self._dropped += 1
@@ -360,6 +373,7 @@ class Recorder:
             if not self._scope.allows(code.co_filename):
                 return None  # NOT DISABLE: this event rejects it (see the note above)
             frame_id = self._frames.exit(sys._getframe(1))
+            self._last_ref.pop(frame_id, None)  # frame gone: drop its change-detection state
             self._emit(
                 EventKind.UNWIND,
                 code,
