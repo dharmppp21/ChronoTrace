@@ -67,6 +67,7 @@ from chronotrace.recorder.events import Event, EventKind
 from chronotrace.recorder.frames import FrameRegistry
 from chronotrace.recorder.identity import ObjectIdentity
 from chronotrace.recorder.interning import InternTable
+from chronotrace.recorder.redact import REDACTED, Redactor
 from chronotrace.recorder.scope import Scope
 from chronotrace.recorder.sink import Sink
 from chronotrace.recorder.values import ValuePool, ValueRef
@@ -125,6 +126,7 @@ class Recorder:
         "_names",
         "_policy",
         "_propagating",
+        "_redact",
         "_scope",
         "_seq",
         "_tool_id",
@@ -139,26 +141,33 @@ class Recorder:
         *,
         capture_values: bool = True,
         policy: CapturePolicy = DEFAULT_POLICY,
+        redact: Redactor | None = None,
     ) -> None:
         """Build a recorder. Nothing is instrumented until `start()`.
 
         Args:
             sink: where events go. Must not raise from `emit`; if it does, the
                 recorder degrades rather than propagating (see module docstring).
-            scope: which code to record. Defaults to "everything except
-                ChronoTrace itself". Injectable for tests; day 9 makes it
-                user-configurable.
+            scope: which code to record. Defaults to the current working
+                directory's tree, excluding the stdlib, site-packages and
+                ChronoTrace itself. The config layer builds this from user flags.
             capture_values: record local variable values, not just control flow.
                 A flag rather than a hard-coded truth because day 3 measured value
                 capture as the dominant cost (2,370x naive, 6.1x with change
                 detection), and days 40-41 need to profile the two halves apart.
                 Turning it off yields day 5's recorder exactly.
             policy: what one captured value may cost. See `capture.CapturePolicy`.
+            redact: decides which locals are secrets to withhold. Defaults to the
+                standard name patterns -- redaction is on by default because
+                failing safe means never leaking a token no one remembered to
+                mask. The recorder takes a `Redactor`, not a config object, so it
+                stays the bottom layer and never imports the config system.
         """
         self.sink = sink
         self._scope = scope if scope is not None else Scope()
         self._capture_values = capture_values
         self._policy = policy
+        self._redact = redact if redact is not None else Redactor()
         self._identity = ObjectIdentity()
         self._names: InternTable[str] = InternTable()
         self._values = ValuePool()
@@ -281,7 +290,14 @@ class Recorder:
             last = self._last_ref[frame_id] = {}
         for name, value in frame.f_locals.items():
             name_id = self._names.intern(name)
-            ref = self._values.add(capture(value, self._policy, self._identity))
+            # Redaction is a *read* gate: a secret-named local never reaches
+            # capture(), so its value is never copied into our buffers. The name
+            # is still recorded; only the value becomes a marker.
+            if self._redact.should_redact(name):
+                captured = REDACTED
+            else:
+                captured = capture(value, self._policy, self._identity)
+            ref = self._values.add(captured)
             if last.get(name_id) == ref:
                 continue  # unchanged since we last saw this binding: record nothing
             last[name_id] = ref
