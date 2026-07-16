@@ -48,9 +48,11 @@ def interleaved_generators() -> list[int]:
 def abandoned_generator() -> int:
     """A generator dropped before exhaustion.
 
-    Its frame still exits: CPython throws GeneratorExit in during collection,
-    producing RAISE -> EXCEPTION_HANDLED -> RERAISE -> PY_UNWIND. Measured, and
-    the reason the registry cannot leak.
+    On CPython >= 3.13 its frame still exits: GeneratorExit thrown during
+    collection produces RAISE -> EXCEPTION_HANDLED -> RERAISE -> PY_UNWIND, so the
+    registry cannot leak. CPython 3.12 does not emit that PY_UNWIND under
+    sys.monitoring (see tests/recorder/test_generators.py's xfail), so on 3.12
+    this one frame leaks -- a documented interpreter limitation, not our bug.
     """
     gen = numbers(100)
     first = next(gen)
