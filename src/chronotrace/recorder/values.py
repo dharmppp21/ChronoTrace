@@ -10,13 +10,13 @@ list was re-walked on all 13,210 lines despite never changing after line one.
 Capturing each distinct value once and referencing it thereafter took the same
 workload to **6.1x** (`spikes/RESULTS-capture.md`).
 
-So: a loop that touches the same list a million times pays for one capture and
-999,999 integer copies.
+So: a loop that touches the same list a million times captures it a million times
+(a mutable list could change under us, so we cannot skip the capture -- see
+dedup.py), but *stores* it once and hands back the same reference every time.
 
-Today's pool is a placeholder -- it appends and returns an index, deduplicating
-nothing. Day 8 makes it a content-addressed cache, which is where the 387x
-actually comes from. The *type* is fixed today because seven layers reference it;
-the *implementation* is deliberately trivial until there is something to measure.
+Deduplication is content-addressed and lives in `dedup.py`; this pool just owns
+the storage and routes `add` through the cache. The *type* has been fixed since
+day 4 because seven layers reference `ValueRef`; day 8 filled in the body.
 """
 
 from __future__ import annotations
@@ -24,6 +24,7 @@ from __future__ import annotations
 from typing import NewType
 
 from chronotrace.recorder.capture import CapturedValue
+from chronotrace.recorder.dedup import DEFAULT_BUDGET_BYTES, DedupCache, digest
 
 ValueRef = NewType("ValueRef", int)
 """Index into a `ValuePool`.
@@ -36,36 +37,57 @@ standing between us and a silent field mix-up.
 
 
 class ValuePool:
-    """Holds captured values; hands out references to them.
+    """Holds captured values once each; hands out references to them.
 
-    Placeholder implementation: no deduplication (day 8). The interface is what
-    matters today, because `events.py` and every layer above it name `ValueRef`.
+    Content-addressed: adding a representation already in the pool returns the
+    existing reference instead of storing a copy. The dedup cache (`dedup.py`) is
+    the accelerator; this pool is the source of truth and never evicts -- it *is*
+    the recording. Cache eviction can only make a value be stored twice, never
+    shown wrong.
 
     This pool stores **captured representations** -- plain nested dicts/lists
-    from day 3's capturer -- never the user's live objects. That is what keeps
+    from the capturer -- never the user's live objects. That is what keeps
     the recorder from extending a recorded object's lifetime, which would change
     when the program's finalisers run and could mask the very bug being hunted.
     """
 
-    __slots__ = ("_values",)
+    __slots__ = ("_cache", "_values")
 
-    def __init__(self) -> None:
+    def __init__(self, budget_bytes: int = DEFAULT_BUDGET_BYTES) -> None:
+        """Build an empty pool.
+
+        Args:
+            budget_bytes: memory ceiling for the dedup *cache* (not the pool,
+                which is unbounded because it is the recording). See
+                `dedup.DEFAULT_BUDGET_BYTES`.
+        """
         self._values: list[CapturedValue] = []
+        self._cache = DedupCache(budget_bytes)
 
     def add(self, captured: CapturedValue) -> ValueRef:
-        """Store a captured representation and return its reference.
+        """Store a captured representation once and return its reference.
+
+        Identical content added twice returns the same reference; that collapse
+        is the entire reason recording is affordable (see the module docstring).
 
         Args:
             captured: plain data from the capturer, never a live user object.
 
         Returns:
-            A reference valid for the lifetime of this pool.
+            A reference valid for the lifetime of this pool. Equal content always
+            maps to an equal reference.
 
-        Complexity: O(1) amortised. Day 8 adds hashing, making it O(size of the
-        captured representation) in exchange for deduplication.
+        Complexity: O(size of the captured representation) for the content hash,
+        which the capture policy bounds; O(1) storage.
         """
+        key = digest(captured)
+        seen = self._cache.get(key)
+        if seen is not None:
+            return seen
+        ref = ValueRef(len(self._values))
         self._values.append(captured)
-        return ValueRef(len(self._values) - 1)
+        self._cache.put(key, ref)
+        return ref
 
     def resolve(self, ref: ValueRef) -> CapturedValue:
         """Return the captured representation for `ref`.
