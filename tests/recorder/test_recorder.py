@@ -255,9 +255,9 @@ def test_target_calling_sys_exit_still_releases_the_tool_id() -> None:
 
 
 def test_scope_can_be_injected() -> None:
-    """Day 9 makes scope user-configurable; the seam exists today."""
+    """Scope is user-configurable; an empty root set records nothing."""
     sink = MemorySink()
-    everything_excluded = Scope(excluded_root=str(Path(__file__).parent.parent.parent))
+    everything_excluded = Scope(roots=[])
     with Recorder(sink, scope=everything_excluded):
         sum(range(5))
     assert sink.events == [], "an all-excluding scope must record nothing"
