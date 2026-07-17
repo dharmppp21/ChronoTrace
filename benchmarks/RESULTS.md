@@ -484,12 +484,53 @@ cap. All of day 13's truncation-sweep and hostile tests stay green with compress
 
 ---
 
+## Day 15 — keyframes: the interval tradeoff (`bench_keyframe_interval.py`)
+
+A keyframe is the complete live state at an instant, so reaching any `seq` replays
+**at most one interval** of events instead of replaying from the start. That bound is
+the product's scrubbing-latency contract. This is the curve for buying latency with
+bytes, on a real recording (json_pipeline, 280,997 events, 10,621 pooled values).
+
+A keyframe here is **~185 bytes compressed** (58 raw) — because it stores every live
+local as a `ValueRef`, never a value (the day-14 pool already holds the values). That
+is what makes keyframes affordable enough to place often.
+
+| interval | keyframes | file | overhead | lookup | max events replayed |
+|---:|---:|---:|---:|---:|---:|
+| 100 | 2,810 | 1,471 KiB | **+52.7%** | 33 µs | 100 |
+| **1,000 (default)** | 281 | 1,014 KiB | **+5.3%** | 33 µs | 1,000 |
+| 10,000 | 29 | 968 KiB | +0.5% | 39 µs | 10,000 |
+| 100,000 | 3 | 964 KiB | +0.0% | 29 µs | 100,000 |
+
+```
+file size vs interval  (smaller interval = bigger file, tighter replay bound)
+     100 | ####################################### 1471 KiB   replay ≤ 100
+   1,000 | #######                                 1014 KiB   replay ≤ 1,000
+  10,000 | ####                                     968 KiB   replay ≤ 10,000
+ 100,000 | ####                                     964 KiB   replay ≤ 100,000
+```
+
+**Default = 1,000, defended by the curve.** Interval 100 costs +52.7% of file size to
+shave the replay bound to 100 — a bad trade. 1,000 costs only **+5.3%** for a ≤1,000
+event reconstruction bound (~1 ms of replay), and 10,000 saves almost nothing more
+(+0.5%) while quadrupling the bound. 1,000 is the knee where seek latency is bought
+cheaply; it is a first-class writer knob, and day 18 may retune it alongside block
+size. **Nearest-keyframe lookup is ~30 µs regardless of interval** — O(log K) binary
+search plus one small block decode — which is the per-drag cost the scrubber pays.
+
+**The contract, stated as a guarantee:** *reconstruction to any `seq` replays at most
+`interval` events.* With the default that is ≤ 1,000, no matter how long the recording.
+
+---
+
 ## Standing budgets
 
 | thing | budget | current | measured |
 |---|---:|---:|---|
 | 1M events in `MemorySink` | < 400 MB (day 10) | **225 MB** | day 10 |
 | On-disk bytes/event, realistic workload | smaller is better | **3–10 B/event** | day 14 |
+| Reconstruction replay bound (default interval) | latency contract | **≤ 1,000 events** | day 15 |
+| Keyframe file overhead (default interval) | small | **+5.3%** | day 15 |
 | Recording size, realistic workload | smaller is better | −97.9% | day 8 |
 | Recorder overhead, realistic workload, **flow** | < 20x (ADR-0001 trigger) | **5.4x** | day 9 |
 | Recorder overhead, realistic workload, +capture | < 20x eventually | ~2100x* | day 9 |
