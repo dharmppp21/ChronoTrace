@@ -24,13 +24,22 @@ runs correct, just slower, which is not a correctness violation and not worth th
 complexity of a background-writer drop-queue until it is measured to matter
 (tracked, not hidden).
 
-Why META is empty today
+Compression and the value pool (day 14)
+---------------------------------------
+EVENTS blocks are zstd-compressed as they flush (`compression.py`), on the traced
+program's own thread -- which is why the level is the measured speed/ratio knee, not
+the smallest. The content-addressed VALUES section is written once, at close, from the
+whole pool (`add_value` collects it; `valuepool.py` owns the write-once + collision
+logic). META and INDEX stay uncompressed: both are tiny and read at open, so a
+decompress step there would only slow the thing compression exists to keep fast.
+
+Why META is still empty
 -----------------------
 The META block will carry the config snapshot -- `max_depth`, scope, redaction --
 because a recording made with `max_depth=3` is not interpretable six months later
-without it, and nobody remembers. That content is msgpack, which lands on day 14;
-until then META is the spec-permitted empty map, and the rationale is written down
-here so the reservation is deliberate.
+without it. That is a msgpack map (the codec now exists), but wiring the resolved
+config down to the writer is a later day's plumbing; until then META is the
+spec-permitted empty map, and the reservation stays deliberate.
 """
 
 from __future__ import annotations
@@ -39,8 +48,11 @@ import os
 import zlib
 from typing import BinaryIO
 
+from chronotrace.recorder.capture import CapturedValue
 from chronotrace.recorder.events import Event
-from chronotrace.store.columnar import encode_events
+from chronotrace.recorder.values import ValueRef
+from chronotrace.store.columnar import COUNT_SIZE, encode_events
+from chronotrace.store.compression import compress
 from chronotrace.store.constants import (
     EOCD,
     EOCD_MAGIC,
@@ -50,10 +62,12 @@ from chronotrace.store.constants import (
     HEADER_SIZE,
     INDEX_ENTRY,
     MAGIC,
+    BlockFlag,
     BlockType,
     EocdFlag,
 )
 from chronotrace.store.framing import encode_block
+from chronotrace.store.valuepool import ValuePoolWriter
 
 DEFAULT_BLOCK_EVENTS = 65536
 """Events per EVENTS block. Bigger compresses better and shrinks the index; smaller
@@ -74,12 +88,13 @@ class ChronoWriter:
     references a torn block.
     """
 
-    __slots__ = ("_block_events", "_buffer", "_closed", "_index", "_offset", "_stream")
+    __slots__ = ("_block_events", "_buffer", "_closed", "_index", "_offset", "_pool", "_stream")
 
     def __init__(self, stream: BinaryIO, *, block_events: int = DEFAULT_BLOCK_EVENTS) -> None:
         self._stream = stream
         self._block_events = block_events
         self._buffer: list[Event] = []
+        self._pool = ValuePoolWriter()
         self._index: list[tuple[int, int, int]] = []  # (block_type, offset, length)
         self._offset = 0
         self._closed = False
@@ -92,8 +107,17 @@ class ChronoWriter:
         if len(self._buffer) >= self._block_events:
             self._flush()
 
+    def add_value(self, captured: CapturedValue) -> ValueRef:
+        """Intern one captured value into the pool; return the `ValueRef` events cite.
+
+        Content-addressed and write-once (see `valuepool.py`): identical content
+        returns the same reference. The pool is buffered and written as the VALUES
+        section at `close`, so the whole recording's values share one directory.
+        """
+        return self._pool.add(captured)
+
     def close(self, *, truncated: bool = False) -> None:
-        """Flush the last block, write the index and EOCD. Idempotent.
+        """Flush events, write the value pool, then the index and EOCD. Idempotent.
 
         Args:
             truncated: mark the recording incomplete (events were dropped).
@@ -102,6 +126,12 @@ class ChronoWriter:
             return
         self._closed = True
         self._flush()
+        if self._pool:
+            # ponytail: one VALUES block. Split into size-bounded blocks with a global
+            # ref->block directory only when a pool outgrows a block (day 15+ needs it).
+            self._write_block(
+                BlockType.VALUES, compress(self._pool.encode()), BlockFlag.COMPRESSED_ZSTD
+            )
         index_payload = b"".join(INDEX_ENTRY.pack(t, o, ln) for t, o, ln in self._index)
         index_offset = self._offset
         self._write_block(BlockType.INDEX, index_payload)
@@ -120,11 +150,18 @@ class ChronoWriter:
     def _flush(self) -> None:
         if not self._buffer:
             return
-        self._write_block(BlockType.EVENTS, encode_events(self._buffer))
+        # Keep the u32 event count uncompressed at the front so the reader can index by
+        # seq without decompressing every block (peek_count); compress only the columns.
+        # The CRC (in encode_block) then covers the stored bytes, as the spec requires.
+        blob = encode_events(self._buffer)
+        payload = blob[:COUNT_SIZE] + compress(blob[COUNT_SIZE:])
+        self._write_block(BlockType.EVENTS, payload, BlockFlag.COMPRESSED_ZSTD)
         self._buffer.clear()
 
-    def _write_block(self, block_type: BlockType, payload: bytes) -> None:
-        block = encode_block(block_type, payload)
+    def _write_block(
+        self, block_type: BlockType, payload: bytes, flags: BlockFlag = BlockFlag.NONE
+    ) -> None:
+        block = encode_block(block_type, payload, flags)
         offset = self._offset
         self._write(block)  # may raise; index entry is recorded only after success
         self._index.append((block_type, offset, len(block)))

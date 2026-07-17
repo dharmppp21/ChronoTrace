@@ -137,6 +137,19 @@ def test_a_giant_rle_run_is_bounded() -> None:
         reader[0]
 
 
+def test_a_compressed_block_declaring_a_huge_size_is_a_clean_error_not_an_oom() -> None:
+    """A decompression bomb: the block indexes fine (its raw u32 count is a modest 1),
+    but the compression frame behind the count claims a 2 GB decompressed size. The
+    reader must reject it on access without allocating the 2 GB."""
+    count = struct.pack("<I", 1)  # peek_count sees a valid count, so the block is indexed
+    frame = struct.pack("<B I", 1, 2**31) + b"x"  # codec=zstd, raw_len=2GB, 1-byte body
+    forged = _header() + encode_block(BlockType.EVENTS, count + frame, BlockFlag.COMPRESSED_ZSTD)
+    reader = ChronoReader.from_bytes(forged)
+    _assert_bounded(lambda: list(reader.iter_events()))
+    with pytest.raises(CorruptRecording):
+        list(reader.iter_events())
+
+
 def test_a_footer_pointing_into_the_header_falls_back_to_scan() -> None:
     """An index offset that points backwards must not be dereferenced blindly."""
     from chronotrace.store.constants import EOCD, EOCD_MAGIC

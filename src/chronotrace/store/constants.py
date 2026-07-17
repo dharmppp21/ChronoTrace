@@ -51,10 +51,17 @@ FORMAT_VERSION_MAJOR = 1
 """Incompatible-change counter. A reader MUST refuse a file whose major exceeds
 its own -- the layout may have changed in ways it cannot parse."""
 
-FORMAT_VERSION_MINOR = 0
+FORMAT_VERSION_MINOR = 1
 """Backward-compatible-addition counter. A reader MAY open a file with a higher
 minor than its own: new *optional* blocks are skippable and new header fields live
-past `header_size`. It MUST NOT guess at anything it does not recognise."""
+past `header_size`. It MUST NOT guess at anything it does not recognise.
+
+Bumped to 1 on day 14, which activated the `COMPRESSED_ZSTD` block flag (reserved
+in 1.0) and made the VALUES section real msgpack. A 1.1 reader reads 1.0 files
+(no block sets the flag, so nothing is decompressed); a 1.0-only reader must refuse
+a 1.1 block whose flags it does not understand rather than decode compressed bytes
+as data -- which is why compression is a per-block *flag* the reader checks, not a
+silent change of encoding."""
 
 # ---------------------------------------------------------------------------
 # Fixed structures. Field order is the on-disk order; `<` is little-endian.
@@ -197,6 +204,9 @@ class BlockFlag(enum.IntFlag):
 
     NONE = 0
     COMPRESSED_ZSTD = 0x0001
-    """Payload is zstd-compressed (day 14). In v1.0 blocks are stored uncompressed
-    (`NONE`); the flag is defined now so the CRC-over-stored-bytes rule already
-    accounts for it -- the CRC covers whatever bytes are on disk, compressed or not."""
+    """Payload is a zstd compression frame (day 14): `[u8 codec][u32 raw_length]` then
+    the compressed (or, on the incompressible fallback, raw) bytes -- see
+    `store/compression.py`. The block CRC covers these stored bytes, so a reader
+    verifies the CRC, *then* decompresses. A reader that does not implement this flag
+    MUST refuse the block rather than treat the frame as payload -- unlike an EOCD
+    flag, a block-storage flag is gating."""

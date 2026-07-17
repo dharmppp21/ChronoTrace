@@ -57,6 +57,9 @@ _HOST_LE = sys.byteorder == "little"
 _COUNT = struct.Struct("<I")
 _COL_HEADER = struct.Struct("<B I")  # codec, byte_length
 
+COUNT_SIZE = _COUNT.size  # 4; the u32 event-count prefix. Kept uncompressed by the
+# writer so the reader can index by seq (peek_count) without decompressing a block.
+
 _RAW, _RLE, _DELTA_RLE = 0, 1, 2
 
 MAX_EVENTS_PER_BLOCK = 1 << 20

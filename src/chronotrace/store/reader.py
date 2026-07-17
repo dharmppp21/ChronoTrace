@@ -23,14 +23,29 @@ opens as its readable prefix -- exactly the crash case). And Windows mmap differ
 from POSIX: a zero-length file cannot be mapped, so an empty file is caught before
 mmap and raised as `TruncatedRecording`.
 
-Lazy blocks with an LRU
------------------------
+Lazy blocks with an LRU of *decoded* blocks
+-------------------------------------------
 A block is decoded only when an event inside it is asked for, and the last
 `cache_blocks` decoded blocks are kept. Decoding a whole ~65k-event block to return
 one event is *right* here: sequential scrubbing is the dominant access pattern, so
 the next request almost always lands in the same block, and the LRU makes that a
 dictionary hit. Combined with `MAX_EVENTS_PER_BLOCK`, the retained memory is bounded
 at `cache_blocks x MAX_EVENTS_PER_BLOCK` events even for a hostile file.
+
+The cache holds the fully-*decoded* events, i.e. post-decompression and
+post-columnar-decode -- deliberately, not the compressed bytes. Caching decompressed
+blocks is what matters for scrubbing: a repeat hit on a block (the common case as the
+playhead drags) skips *both* the zstd decompress and the columnar decode, not just a
+re-read. Caching compressed bytes would still pay the decode on every access and save
+only an mmap fault the OS page cache already handles.
+
+Transparent decompression
+--------------------------
+Day 14's compression is invisible above this layer. `decode_block` returns whatever
+bytes are on disk (verified against the block CRC); if the block flags say
+`COMPRESSED_ZSTD`, `_raw_payload` runs the bounded decompressor before the payload is
+decoded. A decompression bomb or a corrupt frame becomes a `CorruptRecording`, same as
+any other bad block.
 """
 
 from __future__ import annotations
@@ -44,8 +59,10 @@ from collections.abc import Iterator
 from types import TracebackType
 from typing import BinaryIO
 
+from chronotrace.recorder.capture import CapturedValue
 from chronotrace.recorder.events import Event
-from chronotrace.store.columnar import MAX_EVENTS_PER_BLOCK, decode_events, peek_count
+from chronotrace.store.columnar import COUNT_SIZE, MAX_EVENTS_PER_BLOCK, decode_events, peek_count
+from chronotrace.store.compression import decompress
 from chronotrace.store.constants import (
     BLOCK_HEADER_SIZE,
     EOCD,
@@ -56,14 +73,15 @@ from chronotrace.store.constants import (
     HEADER_SIZE,
     INDEX_ENTRY,
     MAGIC,
+    BlockFlag,
     BlockType,
     EocdFlag,
 )
 from chronotrace.store.errors import CorruptRecording, TruncatedRecording, UnsupportedVersion
 from chronotrace.store.framing import BlockError, decode_block
+from chronotrace.store.valuepool import decode_pool, unpack_value
 
 DEFAULT_CACHE_BLOCKS = 8
-_COUNT_SIZE = 4  # the u32 event count at the start of an EVENTS payload
 
 # (start_seq, block_offset, event_count) for one EVENTS block. The block length is
 # not kept -- decode_block re-reads it from the frame, so storing it would be dead.
@@ -87,8 +105,10 @@ class ChronoReader:
         "_count",
         "_file",
         "_mmap",
+        "_pool",
         "_starts",
         "_truncated",
+        "_values_offset",
     )
 
     def __init__(
@@ -108,6 +128,8 @@ class ChronoReader:
         self._starts: list[int] = []
         self._count = 0
         self._truncated = False
+        self._values_offset: int | None = None
+        self._pool: list[bytes] | None = None  # the decoded value pool, decoded once, lazily
         self._validate_header()
         self._build_index()
 
@@ -155,9 +177,10 @@ class ChronoReader:
     def _build_index(self) -> None:
         footer = self._blocks_from_footer()
         if footer is not None:
-            locations, self._truncated = footer
+            locations, self._values_offset, self._truncated = footer
         else:
-            locations, self._truncated = self._blocks_from_scan(), True
+            locations, self._values_offset = self._blocks_from_scan()
+            self._truncated = True
         seq = 0
         for offset, count in locations:
             self._blocks.append((seq, offset, count))
@@ -167,8 +190,8 @@ class ChronoReader:
 
     # -- index: footer (lazy) or scan (crash recovery) ----------------------
 
-    def _blocks_from_footer(self) -> tuple[list[tuple[int, int]], bool] | None:
-        """EVENTS blocks (offset, count) from the footer index, or None.
+    def _blocks_from_footer(self) -> tuple[list[tuple[int, int]], int | None, bool] | None:
+        """EVENTS blocks (offset, count) and the VALUES offset from the footer, or None.
 
         None when the footer is absent, out of bounds, corrupt, or claims an
         impossible count -- the caller then recovers by scanning.
@@ -186,24 +209,31 @@ class ChronoReader:
         if block_type != BlockType.INDEX:
             return None
         locations: list[tuple[int, int]] = []
+        values_offset: int | None = None
         for k in range(0, len(index_payload) - INDEX_ENTRY.size + 1, INDEX_ENTRY.size):
             entry_type, offset, length = INDEX_ENTRY.unpack_from(index_payload, k)
+            if entry_type == BlockType.VALUES:
+                values_offset = offset if self._in_bounds(offset, length) else values_offset
+                continue
             if entry_type != BlockType.EVENTS:
                 continue
             count = self._safe_count(offset, length)
             if count is None:
                 return None  # entry out of bounds or over the cap: distrust the footer
             locations.append((offset, count))
-        return locations, bool(flags & EocdFlag.TRUNCATED)
+        return locations, values_offset, bool(flags & EocdFlag.TRUNCATED)
 
-    def _blocks_from_scan(self) -> list[tuple[int, int]]:
-        """Recover EVENTS blocks by walking frames from the header, CRC-checking each.
+    def _blocks_from_scan(self) -> tuple[list[tuple[int, int]], int | None]:
+        """Recover EVENTS blocks (and the VALUES offset) by walking frames from the header.
 
-        Stops at the first torn block. The crash path; it touches every page, unlike
-        the footer path -- which is why it is the fallback, not the default.
+        CRC-checks each and stops at the first torn block. The crash path; it touches
+        every page, unlike the footer path -- which is why it is the fallback, not the
+        default. VALUES is written at close, so a scanned (crashed) file usually has
+        none; it is picked up here only for a file torn after VALUES but before the EOCD.
         """
         buf, size = self._buf, len(self._buf)
         locations: list[tuple[int, int]] = []
+        values_offset: int | None = None
         pos = HEADER_SIZE
         while pos < size:
             try:
@@ -215,8 +245,10 @@ class ChronoReader:
                 if count is None:
                     break  # a CRC-valid but impossible block: stop at the good prefix
                 locations.append((pos, count))
+            elif block_type == BlockType.VALUES:
+                values_offset = pos
             pos = nxt
-        return locations
+        return locations, values_offset
 
     def _in_bounds(self, offset: int, length: int) -> bool:
         return (
@@ -229,7 +261,7 @@ class ChronoReader:
         """A block's event count, or None if the block or count is out of bounds."""
         if not self._in_bounds(offset, length):
             return None
-        if offset + BLOCK_HEADER_SIZE + _COUNT_SIZE > len(self._buf):
+        if offset + BLOCK_HEADER_SIZE + COUNT_SIZE > len(self._buf):
             return None
         count = peek_count(self._buf, offset + BLOCK_HEADER_SIZE)
         return count if 0 <= count <= MAX_EVENTS_PER_BLOCK else None
@@ -276,14 +308,59 @@ class ChronoReader:
             self._cache.move_to_end(offset)
             return cached
         try:
-            _block_type, _flags, payload, _next = decode_block(self._buf, offset)  # CRC-checked
-            events = decode_events(payload)  # allocations bounded (see columnar.py)
+            _bt, flags, payload, _next = decode_block(self._buf, offset)  # CRC-checked
+            events = decode_events(self._events_payload(flags, payload))  # bounded (columnar.py)
         except (BlockError, ValueError, struct.error) as exc:
             raise CorruptRecording(f"block at offset {offset}: {exc}") from exc
         self._cache[offset] = events
         if len(self._cache) > self._cache_blocks:
             self._cache.popitem(last=False)
         return events
+
+    def _events_payload(self, flags: int, payload: bytes) -> bytes:
+        """A columnar EVENTS payload, decompressing the columns behind the raw count.
+
+        The u32 count is stored uncompressed (so `peek_count` can index by seq without
+        decompressing); only the columns after it are the compression frame. VALUES has
+        no such prefix, so it decompresses whole. `decompress` is bounded, so a bomb or
+        corrupt frame raises a `ValueError` subclass the callers turn into
+        `CorruptRecording`.
+        """
+        if flags & BlockFlag.COMPRESSED_ZSTD:
+            return payload[:COUNT_SIZE] + decompress(payload[COUNT_SIZE:])
+        return payload
+
+    # -- values -------------------------------------------------------------
+
+    def value(self, ref: int) -> CapturedValue:
+        """Resolve a `value_ref` (from a VAR_WRITE event) to its captured value.
+
+        The VALUES section is decoded once and its blob list cached; this decodes the
+        single msgpack blob asked for. The pool is the durable truth a ref resolves
+        against -- see `valuepool.py`.
+
+        Raises:
+            IndexError: `ref` is outside the pool.
+            CorruptRecording: the VALUES block is damaged or hostile.
+        """
+        blobs = self._pool_blobs()
+        if not 0 <= ref < len(blobs):
+            raise IndexError(f"value_ref {ref} out of range [0, {len(blobs)})")
+        return unpack_value(blobs[ref])
+
+    def _pool_blobs(self) -> list[bytes]:
+        if self._pool is not None:
+            return self._pool
+        if self._values_offset is None:
+            self._pool = []  # a recording with no captured values (control-flow only)
+            return self._pool
+        try:
+            _bt, flags, payload, _next = decode_block(self._buf, self._values_offset)  # CRC-checked
+            section = decompress(payload) if flags & BlockFlag.COMPRESSED_ZSTD else payload
+            self._pool = decode_pool(section)  # allocations bounded (valuepool.py)
+        except (BlockError, ValueError, struct.error) as exc:
+            raise CorruptRecording(f"value pool at offset {self._values_offset}: {exc}") from exc
+        return self._pool
 
     # -- lifecycle ----------------------------------------------------------
 
@@ -298,6 +375,7 @@ class ChronoReader:
     def close(self) -> None:
         """Release the mmap and file. Idempotent."""
         self._cache.clear()
+        self._pool = None
         if self._mmap is not None:
             self._mmap.close()
             self._mmap = None
