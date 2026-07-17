@@ -61,15 +61,28 @@ format stays free to change independently of how observation works.
 
 ## What exists today (Phase 1 complete)
 
-Only `recorder` is implemented. `store` is a documented placeholder; the rest are
-names in this diagram. The recorder produces an in-memory event stream
-(`MemorySink`); Phase 2 (days 11–18) makes it durable.
+Only `recorder` is implemented. `store` has its format **specified** but no codec
+yet; the rest are names in this diagram. The recorder produces an in-memory event
+stream (`MemorySink`); Phase 2 (days 11–18) makes it durable.
 
 | Layer | Status | Built |
 |---|---|---|
 | recorder | **done** | days 4–10 |
-| store | placeholder | phase 2 |
+| store | format spec'd ([`docs/format-spec.md`](format-spec.md)); codec next | days 11–18 |
 | index, reconstruct, query, server, frontend | planned | phases 2–5 |
+
+## The storage format
+
+The `store` layer persists the event stream to the `.chrono` file format —
+a header, length-and-CRC-framed blocks, and an index written last whose presence
+signals a clean close. Events are **columnar** (measured 7–12× smaller than row,
+[ADR-0004](adr/0004-chrono-file-format.md)); values are a content-addressed pool;
+opening a file is a pure data operation with `pickle` banned at the spec level.
+The normative byte layout — implementable from scratch in any language — is
+[`docs/format-spec.md`](format-spec.md); its machine form is
+`src/chronotrace/store/constants.py`. The store may import the recorder's *event
+model* only, never its runtime machinery, so the file format stays free to change
+independently of how observation works.
 
 ## Recorder internals
 
