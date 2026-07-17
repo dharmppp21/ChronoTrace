@@ -59,6 +59,14 @@ _COL_HEADER = struct.Struct("<B I")  # codec, byte_length
 
 _RAW, _RLE, _DELTA_RLE = 0, 1, 2
 
+MAX_EVENTS_PER_BLOCK = 1 << 20
+"""Hard cap on the events one block may claim, so decoding *untrusted* input cannot
+be tricked into an unbounded allocation. The writer's default is 65536, so 1M is
+16x headroom; a block claiming more is corrupt or hostile and is rejected. `decode`
+is a trust boundary -- a hostile file can compute a valid CRC over malformed bytes,
+so the CRC does not make the payload safe, and every length the payload declares
+must be bounded here."""
+
 
 def _pack_i64(values: list[int]) -> bytes:
     """`values` as little-endian int64 -- explicitly, never host order.
@@ -95,11 +103,20 @@ def _rle_encode(values: list[int]) -> bytes:
     return _pack_i64(pairs)
 
 
-def _rle_decode(data: bytes) -> list[int]:
-    pairs = _unpack_i64(data)
+def _rle_decode(data: bytes, limit: int) -> list[int]:
+    """Expand `(value, run)` pairs, refusing to produce more than `limit` values.
+
+    The bound is the whole security of this function: `run` is a number read from
+    an untrusted file, and `[value] * run` with a hostile `run` is an OOM. A run
+    that would push the output past `limit` (the block's declared event count) is a
+    corrupt payload, not data.
+    """
+    pairs = iter(_unpack_i64(data))
     out: list[int] = []
-    for k in range(0, len(pairs), 2):
-        out.extend([pairs[k]] * pairs[k + 1])
+    for value, run in zip(pairs, pairs, strict=False):  # pair up; a trailing odd is dropped
+        if run < 0 or len(out) + run > limit:
+            raise ValueError("RLE run exceeds the block's declared event count")
+        out.extend([value] * run)
     return out
 
 
@@ -120,13 +137,18 @@ def _encode_column(values: list[int]) -> tuple[int, bytes]:
     return min(candidates, key=lambda c: len(c[1]))
 
 
-def _decode_column(codec: int, data: bytes) -> list[int]:
+def _decode_column(codec: int, data: bytes, limit: int) -> list[int]:
+    """Decode one column, bounded to at most `limit` values.
+
+    Raw is inherently bounded (`len(data) // 8` values, and `data` is a slice of a
+    file-bounded payload); the RLE codecs need the explicit `limit`.
+    """
     if codec == _RAW:
         return _unpack_i64(data)
     if codec == _RLE:
-        return _rle_decode(data)
+        return _rle_decode(data, limit)
     if codec == _DELTA_RLE:
-        return list(accumulate(_rle_decode(data)))
+        return list(accumulate(_rle_decode(data, limit)))
     raise ValueError(f"unknown column codec {codec}")
 
 
@@ -144,22 +166,46 @@ def encode_events(events: list[Event]) -> bytes:
     return bytes(out)
 
 
+def peek_count(buf: object, payload_offset: int) -> int:
+    """The event count of an EVENTS block, without decoding it.
+
+    The reader calls this to size its seq index lazily -- reading 4 bytes per block
+    instead of touching every page. The value is untrusted (no CRC yet); the caller
+    bounds it against `MAX_EVENTS_PER_BLOCK`.
+
+    Args:
+        buf: any buffer (bytes or mmap) holding the block.
+        payload_offset: file offset of the payload's first byte (block offset +
+            frame size). The caller must have checked it is in bounds.
+    """
+    return int(_COUNT.unpack_from(buf, payload_offset)[0])  # type: ignore[arg-type]
+
+
 def decode_events(payload: bytes) -> list[Event]:
     """Inverse of `encode_events`. Reconstructs the exact events, `None`s restored.
 
+    **Parses untrusted input.** A hostile file can carry a valid CRC over malformed
+    bytes, so this bounds every allocation the payload requests: the declared event
+    count is capped at `MAX_EVENTS_PER_BLOCK`, and each column may expand to at most
+    that count. A short or truncated slice yields a `struct.error`; the reader turns
+    both that and the `ValueError`s below into `CorruptRecording`.
+
     Raises:
-        ValueError: a column decodes to the wrong length or an unknown codec -- a
-            malformed EVENTS payload (the framing CRC makes this rare).
+        ValueError: an out-of-range count, an over-long RLE run, a column of the
+            wrong length, or an unknown codec.
+        struct.error: the payload is too short to hold a header it declares.
 
     Complexity: O(fields x events).
     """
     (count,) = _COUNT.unpack_from(payload, 0)
+    if not 0 <= count <= MAX_EVENTS_PER_BLOCK:
+        raise ValueError(f"block claims {count} events, over the {MAX_EVENTS_PER_BLOCK} cap")
     pos = _COUNT.size
     columns: dict[str, list[int]] = {}
     for field in _FIELDS:
         codec, length = _COL_HEADER.unpack_from(payload, pos)
         pos += _COL_HEADER.size
-        values = _decode_column(codec, payload[pos : pos + length])
+        values = _decode_column(codec, payload[pos : pos + length], count)
         if len(values) != count:
             raise ValueError(f"column {field!r} has {len(values)} values, expected {count}")
         columns[field] = values

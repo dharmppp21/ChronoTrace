@@ -389,6 +389,33 @@ fsyncing per block.
 
 ---
 
+## Day 13 — read path (`bench_store_read.py`)
+
+`ChronoReader` over a 1M-event file. The file here is synthetic with a constant
+timestamp stride, so its 1.1 B/event is *not* a compression figure (day 12's
+`bench_store_write` has the real ones) -- this benchmark measures latency, not size.
+
+| metric | value | meaning |
+|---|---:|---|
+| open (lazy) | **130 KiB** heap | the block index for ~15 blocks -- O(blocks), not O(events). Decoding all 1M events would be ~150 MB, so open touches ~0.1% of that. |
+| sequential `__getitem__` | **3.0 µs** | LRU-warm; the timeline scrubber's dominant pattern (adjacent seqs land in the cached block). |
+| random `__getitem__` | 11 µs median | a random jump either hits the LRU or decodes a whole block. |
+
+**Lazy open is the headline.** Opening a 1M-event recording allocates 130 KiB of
+Python heap -- the seq index, one entry per block -- and faults in *no* event pages
+until something is read. This is the entire reason for mmap + lazy blocks: a 10 GB
+recording opens in the same 130 KiB and costs RSS only for the pages the scrubber
+actually visits.
+
+**The random-access tail is a cold block decode, and it carries the recorder's GC
+cost.** A random jump to an uncached block decodes ~65536 events at once (the
+"decode the whole block" trade that makes sequential scrubbing 3 µs), which
+allocates ~65536 `Event` objects and can trip a gen-2 GC pause -- the same
+short-lived-object pressure flagged for day 40. Sequential access, the common case,
+never pays it.
+
+---
+
 ## Standing budgets
 
 | thing | budget | current | measured |

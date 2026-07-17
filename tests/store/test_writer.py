@@ -5,12 +5,19 @@ from __future__ import annotations
 
 import io
 from pathlib import Path
-from typing import Any
 
 import pytest
 
 from chronotrace.recorder.events import Event, EventKind
-from chronotrace.store.writer import ChronoWriter, FileSink, read_all_events
+from chronotrace.store import ChronoReader, CorruptRecording, UnsupportedVersion
+from chronotrace.store.writer import ChronoWriter, FileSink
+
+
+def _read(data: bytes) -> tuple[list[Event], bool]:
+    """Read a whole in-memory .chrono buffer back, via the real reader."""
+    reader = ChronoReader.from_bytes(data)
+    return list(reader.iter_events()), reader.truncated
+
 
 # The minimal file from docs/format-spec.md §12, produced by the writer with zero
 # events. This locks the format: any layout change fails here, loudly.
@@ -50,7 +57,7 @@ def test_round_trip_through_a_real_file(tmp_path: Path, n: int) -> None:
         sink.emit(event)
     sink.close()
 
-    read_back, truncated = read_all_events(path.read_bytes())
+    read_back, truncated = _read(path.read_bytes())
     assert read_back == events
     assert truncated is False
 
@@ -82,7 +89,7 @@ def test_many_small_blocks_round_trip() -> None:
         writer.add(event)
     writer.close()
 
-    read_back, truncated = read_all_events(buf.getvalue())
+    read_back, truncated = _read(buf.getvalue())
     assert read_back == events
     assert truncated is False
 
@@ -93,7 +100,7 @@ def test_truncated_flag_round_trips() -> None:
     writer.add(_ev(0))
     writer.close(truncated=True)
 
-    _events, truncated = read_all_events(buf.getvalue())
+    _events, truncated = _read(buf.getvalue())
     assert truncated is True
 
 
@@ -109,7 +116,7 @@ def test_crash_between_blocks_recovers_the_prefix() -> None:
     # Simulate a kill after the second EVENTS block: drop the footer and last block.
     # Two full events blocks + header + META remain; chop somewhere in the third.
     crashed = full[: len(full) // 2]
-    events, truncated = read_all_events(crashed)
+    events, truncated = _read(crashed)
     assert truncated is True
     assert events == [_ev(s) for s in range(len(events))]  # a clean prefix, no partial event
     assert events, "at least the first block should be recoverable"
@@ -140,20 +147,20 @@ def test_filesink_drops_on_write_failure_without_raising(tmp_path: Path) -> None
     sink.close()
 
     assert sink.truncated is True
-    events, truncated = read_all_events(path.read_bytes())
+    events, truncated = _read(path.read_bytes())
     assert truncated is True
     assert events == [_ev(0), _ev(1)]  # the one block written before the failure
 
 
 def test_a_non_chrono_file_is_rejected() -> None:
-    with pytest.raises(ValueError, match=r"not a \.chrono"):
-        read_all_events(b"this is not a chrono file at all")
+    with pytest.raises(CorruptRecording, match=r"not a \.chrono"):
+        _read(b"this is not a chrono file at all")  # 32 bytes: long enough to reach the magic check
 
 
-def test_a_newer_major_version_is_refused(monkeypatch: Any) -> None:
+def test_a_newer_major_version_is_refused() -> None:
     buf = io.BytesIO()
     ChronoWriter(buf).close()
     data = bytearray(buf.getvalue())
     data[11] = 99  # bump version_major in the header (offset 11)
-    with pytest.raises(ValueError, match="major version"):
-        read_all_events(bytes(data))
+    with pytest.raises(UnsupportedVersion, match="upgrade"):
+        _read(bytes(data))

@@ -40,11 +40,10 @@ import zlib
 from typing import BinaryIO
 
 from chronotrace.recorder.events import Event
-from chronotrace.store.columnar import decode_events, encode_events
+from chronotrace.store.columnar import encode_events
 from chronotrace.store.constants import (
     EOCD,
     EOCD_MAGIC,
-    EOCD_SIZE,
     FORMAT_VERSION_MAJOR,
     FORMAT_VERSION_MINOR,
     HEADER,
@@ -54,7 +53,7 @@ from chronotrace.store.constants import (
     BlockType,
     EocdFlag,
 )
-from chronotrace.store.framing import BlockError, decode_block, encode_block
+from chronotrace.store.framing import encode_block
 
 DEFAULT_BLOCK_EVENTS = 65536
 """Events per EVENTS block. Bigger compresses better and shrinks the index; smaller
@@ -180,62 +179,3 @@ class FileSink:
     def truncated(self) -> bool:
         """True if events were dropped -- the recording is a prefix, not the whole."""
         return self._dropping
-
-
-def read_all_events(data: bytes) -> tuple[list[Event], bool]:
-    """Load every event from a `.chrono` buffer. Returns `(events, truncated)`.
-
-    The round-trip counterpart to the writer and the seed of day 13's mmap
-    random-access reader; this one reads the whole file, for small files and tests.
-    Uses the clean path (EOCD -> INDEX) when the footer is present and valid, and
-    falls back to scanning framed blocks when it is not -- which recovers the
-    readable prefix of a crashed recording.
-
-    Raises:
-        ValueError: not a `.chrono` file, or a newer major version we cannot read.
-
-    Complexity: O(events).
-    """
-    if data[: len(MAGIC)] != MAGIC:
-        raise ValueError("not a .chrono file: bad magic")
-    if HEADER.unpack_from(data, 0)[1] > FORMAT_VERSION_MAJOR:
-        raise ValueError("unsupported .chrono major version")
-
-    payloads, truncated = _read_via_index(data)
-    if payloads is None:
-        payloads, truncated = _scan_event_blocks(data), True
-    events = [event for payload in payloads for event in decode_events(payload)]
-    return events, truncated
-
-
-def _read_via_index(data: bytes) -> tuple[list[bytes] | None, bool]:
-    """EVENTS payloads via the footer, or `(None, _)` if the footer is absent/bad."""
-    if len(data) < EOCD_SIZE:
-        return None, False
-    index_offset, _index_length, _crc, flags, magic = EOCD.unpack_from(data, len(data) - EOCD_SIZE)
-    if magic != EOCD_MAGIC:
-        return None, False
-    try:
-        _, _, index_payload, _ = decode_block(data, index_offset)
-        payloads = []
-        for k in range(0, len(index_payload), INDEX_ENTRY.size):
-            block_type, offset, _length = INDEX_ENTRY.unpack_from(index_payload, k)
-            if block_type == BlockType.EVENTS:
-                payloads.append(decode_block(data, offset)[2])
-    except BlockError:
-        return None, False  # footer points at a torn block: recover by scanning
-    return payloads, bool(flags & EocdFlag.TRUNCATED)
-
-
-def _scan_event_blocks(data: bytes) -> list[bytes]:
-    """Walk framed blocks from the header, stopping at the first torn one."""
-    payloads: list[bytes] = []
-    pos = HEADER_SIZE
-    while pos < len(data):
-        try:
-            block_type, _flags, payload, pos = decode_block(data, pos)
-        except BlockError:
-            break  # torn tail: the recovered prefix ends here
-        if block_type == BlockType.EVENTS:
-            payloads.append(payload)
-    return payloads

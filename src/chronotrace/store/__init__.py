@@ -12,11 +12,12 @@ validated.
 
 Public surface
 --------------
-Being filled in during Phase 2 (days 11-18). Day 11 designed the format: the
-normative spec is [`docs/format-spec.md`](../../../docs/format-spec.md) and its
-machine form -- every magic byte, struct and block tag -- is `constants.py`, the
-single source of truth that a reader in any language must agree with. Day 12
-writes the encoder/decoder against it; nothing here reads or writes bytes yet.
+`FileSink` (a `Sink` that records to a `.chrono` file) and `ChronoReader` (a
+read-only, mmap-backed, lazily-decoded view over one) are the API every layer
+above uses; `ChronoWriter` is the lower-level stream writer beneath `FileSink`,
+and the `ChronoError` hierarchy is what a caller catches. The normative byte
+layout is [`docs/format-spec.md`](../../../docs/format-spec.md); its machine form
+is `constants.py`.
 
 What this package must NEVER import
 -----------------------------------
@@ -28,3 +29,22 @@ into the recorder's runtime machinery (monitoring callbacks, frame registry);
 that direction of knowledge would couple the file format to the mechanics of
 observation, and the two must be free to change independently.
 """
+
+from chronotrace.store.errors import (
+    ChronoError,
+    CorruptRecording,
+    TruncatedRecording,
+    UnsupportedVersion,
+)
+from chronotrace.store.reader import ChronoReader
+from chronotrace.store.writer import ChronoWriter, FileSink
+
+__all__ = [
+    "ChronoError",
+    "ChronoReader",
+    "ChronoWriter",
+    "CorruptRecording",
+    "FileSink",
+    "TruncatedRecording",
+    "UnsupportedVersion",
+]

@@ -26,6 +26,7 @@ returning the payload (never hand back unverified bytes). Both failures raise
 
 from __future__ import annotations
 
+import mmap
 import zlib
 
 from chronotrace.store.constants import BLOCK_HEADER, BLOCK_HEADER_SIZE, BlockFlag, BlockType
@@ -64,8 +65,11 @@ def encode_block(block_type: BlockType, payload: bytes, flags: BlockFlag = Block
     return BLOCK_HEADER.pack(len(payload), block_type, flags, zlib.crc32(payload)) + payload
 
 
-def decode_block(data: bytes, offset: int = 0) -> tuple[int, int, bytes, int]:
+def decode_block(data: bytes | mmap.mmap, offset: int = 0) -> tuple[int, int, bytes, int]:
     """Decode the block at `offset` in `data`.
+
+    One decode for both the writer's `bytes` (round-trip) and the reader's mmap, so
+    the CRC check lives in exactly one place and the two can never disagree.
 
     Args:
         data: a buffer (bytes or mmap) containing at least one block at `offset`.
