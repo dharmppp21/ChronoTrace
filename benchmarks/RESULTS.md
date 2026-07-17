@@ -310,11 +310,54 @@ node).
 
 ---
 
+## Day 10 — Phase 1 checkpoint (consolidated)
+
+The numbers Phase 1 is judged on, in one place, all measured on the machine at the
+top of this file.
+
+| metric | value | day | note |
+|---|---:|---:|---|
+| Recording size cut, realistic | **−97.9%** | 8 | content-addressed dedup |
+| Control-flow overhead cut, realistic (scope) | **33×** (180→5.4) | 9 | `DISABLE` filtering |
+| Control-flow overhead, realistic | **5.4×** | 9 | under ADR-0001's 20× trigger |
+| Control-flow overhead, tight loop | 102× | 9 | worst case; `pdb` is 50–100× |
+| Dedup hit rate, realistic | 99.6% | 8 | |
+| Event size (dataclass) | 151 B/event | 4 | `dataclass(slots=True, frozen=True)` |
+| 1M events live in `MemorySink` | 225 MB, 216 B/event | 10 | see below |
+| Per-value capture cost (large value) | 827 µs | 9 | day-40 target |
+
+### 1M-event memory — Phase 2's justification, written down
+
+A 260,000-iteration loop recorded control-flow-only produces **1,040,007 events**
+and peaks at **225 MB** (216 B/event; the 65 B over the raw 151 B dataclass is the
+`list`, the intern tables and live-object overhead). `tracemalloc` peak, not RSS:
+stdlib, cross-platform, and it measures the Python allocation we control.
+
+225 MB for a *modest* program held entirely in RAM is exactly why Phase 2 exists.
+A ten-minute program would not fit; the file store (mmap + zstd, keyframes +
+deltas) is not a nice-to-have but the thing that makes long recordings possible at
+all. The ceiling test asserts < 400 MB so CI has headroom across platforms; the
+real number is recorded here so day 14's compression has a baseline to beat.
+
+### Divergence from the day-2/day-3 spike numbers
+
+ADR-0001's table (spike, day 3) put realistic naive capture at 2,370× and change
+detection at 6.1×. The shipped recorder is **not** 6.1× with capture on, and the
+difference is honest: the 6.1× spike scoped to a single module *and* used an
+unsound `id()` shortcut on mutable lists. The shipped design refuses that shortcut
+([ADR-0003](../docs/adr/0003-dedup-correctness.md)) and re-captures every value,
+so its realistic figure is capture-bound (day 40). What the spike got right is the
+*control-flow* story: scoped flow-only is 5.4×, inside the range the spike
+promised. The value-capture speed is the one number that moved against us, it is
+measured (827 µs/value), and it has a dated owner (day 40) rather than a wish.
+
+---
+
 ## Standing budgets
 
 | thing | budget | current | measured |
 |---|---:|---:|---|
-| 1M events in `MemorySink` | day 10 sets it | 151 MB | day 4 |
+| 1M events in `MemorySink` | < 400 MB (day 10) | **225 MB** | day 10 |
 | Recording size, realistic workload | smaller is better | −97.9% | day 8 |
 | Recorder overhead, realistic workload, **flow** | < 20x (ADR-0001 trigger) | **5.4x** | day 9 |
 | Recorder overhead, realistic workload, +capture | < 20x eventually | ~2100x* | day 9 |
