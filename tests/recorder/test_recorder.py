@@ -6,6 +6,7 @@ protects the target program from us.
 
 from __future__ import annotations
 
+import contextlib
 import sys
 from pathlib import Path
 from typing import Any
@@ -187,16 +188,23 @@ def test_stop_is_idempotent() -> None:
     rec.stop()
 
 
-def test_tool_id_released_after_target_raises() -> None:
+@pytest.mark.parametrize("boom", [None, ValueError, SystemExit, KeyboardInterrupt])
+def test_stop_releases_the_tool_id_on_every_exit_path(boom: type[BaseException] | None) -> None:
     """A leaked tool id is unrecoverable: six exist, and the next run cannot attach.
 
-    This is why try/finally is not optional.
+    stop() must run on every way out of the `with` block -- a clean return, a
+    normal exception, and the two BaseExceptions a real program throws at us:
+    SystemExit (sys.exit) and KeyboardInterrupt (Ctrl-C). This is exactly why
+    __exit__ catches BaseException rather than Exception, and why try/finally in
+    stop() is not optional. Proven by starting a second recorder afterwards: if the
+    id leaked, it cannot attach.
     """
     rec = Recorder(MemorySink())
-    with pytest.raises(ValueError, match="target blew up"), rec:
-        raise ValueError("target blew up")
+    guard = contextlib.nullcontext() if boom is None else pytest.raises(boom)
+    with guard, rec:
+        if boom is not None:
+            raise boom("target blew up")
 
-    # if the id leaked, a second recorder cannot start
     second = Recorder(MemorySink())
     second.start()
     second.stop()
@@ -241,17 +249,6 @@ def test_broken_sink_never_reaches_the_target() -> None:
 
     assert result == 10, "the target must complete correctly despite a dead sink"
     assert rec.dropped > 0, "drops must be counted, so the recording is known incomplete"
-
-
-def test_target_calling_sys_exit_still_releases_the_tool_id() -> None:
-    """SystemExit is a BaseException; the context manager must still unwind."""
-    rec = Recorder(MemorySink())
-    with pytest.raises(SystemExit), rec:
-        sys.exit(3)
-
-    second = Recorder(MemorySink())
-    second.start()
-    second.stop()
 
 
 def test_scope_can_be_injected() -> None:
