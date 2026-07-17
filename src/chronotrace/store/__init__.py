@@ -12,8 +12,11 @@ validated.
 
 Public surface
 --------------
-Filled in during Phase 2 (days 11-18). Day 11 designs the format and writes a
-normative spec *before* any byte is written.
+Being filled in during Phase 2 (days 11-18). Day 11 designed the format: the
+normative spec is [`docs/format-spec.md`](../../../docs/format-spec.md) and its
+machine form -- every magic byte, struct and block tag -- is `constants.py`, the
+single source of truth that a reader in any language must agree with. Day 12
+writes the encoder/decoder against it; nothing here reads or writes bytes yet.
 
 What this package must NEVER import
 -----------------------------------
