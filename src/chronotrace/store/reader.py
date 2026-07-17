@@ -79,6 +79,7 @@ from chronotrace.store.constants import (
 )
 from chronotrace.store.errors import CorruptRecording, TruncatedRecording, UnsupportedVersion
 from chronotrace.store.framing import BlockError, decode_block
+from chronotrace.store.keyframe import KF_SEQ, KF_SEQ_SIZE, Keyframe, decode_keyframe
 from chronotrace.store.valuepool import decode_pool, unpack_value
 
 DEFAULT_CACHE_BLOCKS = 8
@@ -104,6 +105,7 @@ class ChronoReader:
         "_cache_blocks",
         "_count",
         "_file",
+        "_keyframes",
         "_mmap",
         "_pool",
         "_starts",
@@ -130,6 +132,7 @@ class ChronoReader:
         self._truncated = False
         self._values_offset: int | None = None
         self._pool: list[bytes] | None = None  # the decoded value pool, decoded once, lazily
+        self._keyframes: list[tuple[int, int]] = []  # (seq, block_offset), sorted by seq
         self._validate_header()
         self._build_index()
 
@@ -177,24 +180,29 @@ class ChronoReader:
     def _build_index(self) -> None:
         footer = self._blocks_from_footer()
         if footer is not None:
-            locations, self._values_offset, self._truncated = footer
+            locations, self._truncated = footer
         else:
-            locations, self._values_offset = self._blocks_from_scan()
-            self._truncated = True
+            locations, self._truncated = self._blocks_from_scan(), True
         seq = 0
         for offset, count in locations:
             self._blocks.append((seq, offset, count))
             seq += count
         self._count = seq
         self._starts = [start for start, *_ in self._blocks]
+        self._keyframes.sort()  # emitted in seq order, but sort defends a rewritten index
 
     # -- index: footer (lazy) or scan (crash recovery) ----------------------
+    #
+    # Both paths record the VALUES offset and the keyframe (seq, offset) list as side
+    # effects on the instance, and return only the EVENTS locations the seq index
+    # needs -- keeping those two "extra" outputs off the return tuple.
 
-    def _blocks_from_footer(self) -> tuple[list[tuple[int, int]], int | None, bool] | None:
-        """EVENTS blocks (offset, count) and the VALUES offset from the footer, or None.
+    def _blocks_from_footer(self) -> tuple[list[tuple[int, int]], bool] | None:
+        """EVENTS blocks (offset, count) from the footer, or None to fall back to scan.
 
         None when the footer is absent, out of bounds, corrupt, or claims an
-        impossible count -- the caller then recovers by scanning.
+        impossible EVENTS count. An invalid *optional* (VALUES/KEYFRAMES) entry is
+        skipped rather than distrusting the whole footer.
         """
         buf, size = self._buf, len(self._buf)
         if size < EOCD_SIZE:
@@ -209,31 +217,30 @@ class ChronoReader:
         if block_type != BlockType.INDEX:
             return None
         locations: list[tuple[int, int]] = []
-        values_offset: int | None = None
         for k in range(0, len(index_payload) - INDEX_ENTRY.size + 1, INDEX_ENTRY.size):
             entry_type, offset, length = INDEX_ENTRY.unpack_from(index_payload, k)
             if entry_type == BlockType.VALUES:
-                values_offset = offset if self._in_bounds(offset, length) else values_offset
-                continue
-            if entry_type != BlockType.EVENTS:
-                continue
-            count = self._safe_count(offset, length)
-            if count is None:
-                return None  # entry out of bounds or over the cap: distrust the footer
-            locations.append((offset, count))
-        return locations, values_offset, bool(flags & EocdFlag.TRUNCATED)
+                if self._in_bounds(offset, length):
+                    self._values_offset = offset
+            elif entry_type == BlockType.KEYFRAMES:
+                self._record_keyframe(offset, length)
+            elif entry_type == BlockType.EVENTS:
+                count = self._safe_count(offset, length)
+                if count is None:
+                    return None  # a bad required entry: distrust the footer, scan instead
+                locations.append((offset, count))
+        return locations, bool(flags & EocdFlag.TRUNCATED)
 
-    def _blocks_from_scan(self) -> tuple[list[tuple[int, int]], int | None]:
-        """Recover EVENTS blocks (and the VALUES offset) by walking frames from the header.
+    def _blocks_from_scan(self) -> list[tuple[int, int]]:
+        """Recover EVENTS blocks by walking frames from the header, CRC-checking each.
 
-        CRC-checks each and stops at the first torn block. The crash path; it touches
-        every page, unlike the footer path -- which is why it is the fallback, not the
-        default. VALUES is written at close, so a scanned (crashed) file usually has
-        none; it is picked up here only for a file torn after VALUES but before the EOCD.
+        Stops at the first torn block. The crash path; it touches every page, unlike
+        the footer path -- which is why it is the fallback, not the default. VALUES and
+        keyframes are written along the way, so a crashed file may carry the keyframes
+        emitted before the crash even without a footer.
         """
         buf, size = self._buf, len(self._buf)
         locations: list[tuple[int, int]] = []
-        values_offset: int | None = None
         pos = HEADER_SIZE
         while pos < size:
             try:
@@ -246,9 +253,21 @@ class ChronoReader:
                     break  # a CRC-valid but impossible block: stop at the good prefix
                 locations.append((pos, count))
             elif block_type == BlockType.VALUES:
-                values_offset = pos
+                self._values_offset = pos
+            elif block_type == BlockType.KEYFRAMES:
+                self._record_keyframe(pos, nxt - pos)
             pos = nxt
-        return locations, values_offset
+        return locations
+
+    def _record_keyframe(self, offset: int, length: int) -> None:
+        """Index a KEYFRAMES block by its peeked `seq`, skipping it if out of bounds."""
+        if not self._in_bounds(offset, length):
+            return
+        start = offset + BLOCK_HEADER_SIZE
+        if start + KF_SEQ_SIZE > len(self._buf):
+            return
+        kf_seq = int(KF_SEQ.unpack_from(self._buf, start)[0])
+        self._keyframes.append((kf_seq, offset))
 
     def _in_bounds(self, offset: int, length: int) -> bool:
         return (
@@ -361,6 +380,41 @@ class ChronoReader:
         except (BlockError, ValueError, struct.error) as exc:
             raise CorruptRecording(f"value pool at offset {self._values_offset}: {exc}") from exc
         return self._pool
+
+    # -- keyframes ----------------------------------------------------------
+
+    def keyframe_count(self) -> int:
+        """How many keyframes the recording carries. Zero for a 1.1-or-older file."""
+        return len(self._keyframes)
+
+    def nearest_keyframe_at_or_before(self, seq: int) -> Keyframe | None:
+        """The nearest keyframe whose `seq` is <= `seq`, decoded, or None if none is.
+
+        The operation the scrubber calls on every drag: O(log K) binary search over
+        keyframe seqs to find the floor, then one block decode. If that keyframe's
+        block is corrupt, it falls back to the previous keyframe and returns that --
+        the caller then replays a little further. Graceful degradation: a torn
+        keyframe should cost latency, never the answer.
+
+        Complexity: O(log K) plus one keyframe decode (retried on corruption).
+        """
+        i = bisect_right(self._keyframes, seq, key=lambda kf: kf[0]) - 1
+        while i >= 0:
+            kf_seq, offset = self._keyframes[i]
+            try:
+                return self._decode_keyframe(offset, kf_seq)
+            except CorruptRecording:
+                i -= 1  # this keyframe is torn; step back to the previous good one
+        return None
+
+    def _decode_keyframe(self, offset: int, seq: int) -> Keyframe:
+        try:
+            _bt, flags, payload, _next = decode_block(self._buf, offset)  # CRC-checked
+            body = payload[KF_SEQ_SIZE:]  # drop the uncompressed seq prefix
+            raw = decompress(body) if flags & BlockFlag.COMPRESSED_ZSTD else body
+            return decode_keyframe(raw, seq)  # allocations bounded (keyframe.py)
+        except (BlockError, ValueError, struct.error) as exc:
+            raise CorruptRecording(f"keyframe at offset {offset}: {exc}") from exc
 
     # -- lifecycle ----------------------------------------------------------
 

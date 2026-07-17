@@ -51,17 +51,20 @@ FORMAT_VERSION_MAJOR = 1
 """Incompatible-change counter. A reader MUST refuse a file whose major exceeds
 its own -- the layout may have changed in ways it cannot parse."""
 
-FORMAT_VERSION_MINOR = 1
+FORMAT_VERSION_MINOR = 2
 """Backward-compatible-addition counter. A reader MAY open a file with a higher
 minor than its own: new *optional* blocks are skippable and new header fields live
 past `header_size`. It MUST NOT guess at anything it does not recognise.
 
-Bumped to 1 on day 14, which activated the `COMPRESSED_ZSTD` block flag (reserved
-in 1.0) and made the VALUES section real msgpack. A 1.1 reader reads 1.0 files
-(no block sets the flag, so nothing is decompressed); a 1.0-only reader must refuse
-a 1.1 block whose flags it does not understand rather than decode compressed bytes
-as data -- which is why compression is a per-block *flag* the reader checks, not a
-silent change of encoding."""
+* 1 (day 14) activated the `COMPRESSED_ZSTD` block flag (reserved in 1.0) and made
+  the VALUES section real msgpack.
+* 2 (day 15) activated the optional `KEYFRAMES` block (reserved in 1.0): periodic
+  snapshots of live state. Because the block is *optional* (top bit set), a 1.1
+  reader that predates keyframes skips it and still reads every event -- which is
+  exactly what an optional block is for, and why this is a minor bump, not a major.
+
+A 1.2 reader reads 1.0 and 1.1 files unchanged; an older reader opening a 1.2 file
+skips the KEYFRAMES blocks it does not know and loses only fast seek, not data."""
 
 # ---------------------------------------------------------------------------
 # Fixed structures. Field order is the on-disk order; `<` is little-endian.

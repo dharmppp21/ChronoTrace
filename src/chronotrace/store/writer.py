@@ -33,6 +33,16 @@ whole pool (`add_value` collects it; `valuepool.py` owns the write-once + collis
 logic). META and INDEX stay uncompressed: both are tiny and read at open, so a
 decompress step there would only slow the thing compression exists to keep fast.
 
+Keyframes (day 15)
+------------------
+The **writer** owns keyframe cadence -- one every `keyframe_interval` events -- because
+cadence is a storage strategy and the recorder must not know storage exists (the
+dependency arrow). The writer already sees every event, so it folds each into a
+`LiveState` projection and, on the interval, snapshots that state as a KEYFRAMES block.
+A keyframe stores live frames' locals as `ValueRef`s only (the pool holds the values),
+so it is cheap. `seq` 0 always gets one, giving reconstruction a floor it can never
+fall off the start of.
+
 Why META is still empty
 -----------------------
 The META block will carry the config snapshot -- `max_depth`, scope, redaction --
@@ -67,6 +77,7 @@ from chronotrace.store.constants import (
     EocdFlag,
 )
 from chronotrace.store.framing import encode_block
+from chronotrace.store.keyframe import DEFAULT_KEYFRAME_INTERVAL, KF_SEQ, LiveState
 from chronotrace.store.valuepool import ValuePoolWriter
 
 DEFAULT_BLOCK_EVENTS = 65536
@@ -88,12 +99,30 @@ class ChronoWriter:
     references a torn block.
     """
 
-    __slots__ = ("_block_events", "_buffer", "_closed", "_index", "_offset", "_pool", "_stream")
+    __slots__ = (
+        "_block_events",
+        "_buffer",
+        "_closed",
+        "_index",
+        "_interval",
+        "_live",
+        "_offset",
+        "_pool",
+        "_stream",
+    )
 
-    def __init__(self, stream: BinaryIO, *, block_events: int = DEFAULT_BLOCK_EVENTS) -> None:
+    def __init__(
+        self,
+        stream: BinaryIO,
+        *,
+        block_events: int = DEFAULT_BLOCK_EVENTS,
+        keyframe_interval: int = DEFAULT_KEYFRAME_INTERVAL,
+    ) -> None:
         self._stream = stream
         self._block_events = block_events
+        self._interval = keyframe_interval
         self._buffer: list[Event] = []
+        self._live = LiveState()
         self._pool = ValuePoolWriter()
         self._index: list[tuple[int, int, int]] = []  # (block_type, offset, length)
         self._offset = 0
@@ -102,8 +131,16 @@ class ChronoWriter:
         self._write_block(BlockType.META, _EMPTY_META)
 
     def add(self, event: Event) -> None:
-        """Buffer one event, flushing a full block. May raise on a write failure."""
+        """Buffer one event, snapshot on the keyframe cadence, flush a full block.
+
+        The keyframe is taken *after* folding the event into the live state, so it is
+        the state after `seq` -- and `seq` 0 lands on the interval, so a recording
+        always has a keyframe floor. May raise on a write failure.
+        """
         self._buffer.append(event)
+        self._live.apply(event)
+        if event.seq % self._interval == 0:
+            self._emit_keyframe(event.seq)
         if len(self._buffer) >= self._block_events:
             self._flush()
 
@@ -146,6 +183,12 @@ class ChronoWriter:
             )
         )
         self._stream.flush()
+
+    def _emit_keyframe(self, seq: int) -> None:
+        # The u64 seq stays uncompressed at the front so the reader can peek which
+        # instant a keyframe snapshots without decompressing it (the seq index).
+        payload = KF_SEQ.pack(seq) + compress(self._live.encode())
+        self._write_block(BlockType.KEYFRAMES, payload, BlockFlag.COMPRESSED_ZSTD)
 
     def _flush(self) -> None:
         if not self._buffer:
