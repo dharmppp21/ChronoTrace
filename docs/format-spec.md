@@ -98,7 +98,7 @@ The CRC covers the payload *as stored* — after compression, if
 `block_flags` sets `COMPRESSED_ZSTD` (day 14). So the integrity check is on the
 exact bytes on disk; a reader verifies, then decompresses, then decodes.
 
-## 5. EOCD — end of central directory (last 28 bytes)
+## 5. EOCD — end of central directory (last 32 bytes)
 
 Written once, at clean close, at the very end of the file:
 
@@ -107,14 +107,23 @@ Written once, at clean close, at the very end of the file:
 | 0 | 8 | u64 | `index_offset` — file offset of the INDEX block's frame |
 | 8 | 8 | u64 | `index_length` — total bytes of the INDEX block (frame + payload) |
 | 16 | 4 | u32 | `index_crc32` — CRC-32 of the INDEX block's payload |
-| 20 | 8 | bytes | `magic` = `CHRONEND` |
+| 20 | 4 | u32 | `flags` — `EocdFlag`; bit 0 = `TRUNCATED` (events were dropped) |
+| 24 | 8 | bytes | `magic` = `CHRONEND` |
 
-A reader seeks to `EOF − 28`, reads this record, and checks `magic`. If it matches
+A reader seeks to `EOF − 32`, reads this record, and checks `magic`. If it matches
 and `index_crc32` matches the INDEX payload, the file was **closed cleanly** and
 the reader jumps straight to the INDEX. If not, the file is treated as **crashed**
 and recovered by scanning ([§7](#7-reading)). `index_crc32` is redundant with the
 INDEX block's own CRC on purpose: it lets a reader trust the pointer before
 seeking to it.
+
+`flags.TRUNCATED` distinguishes a *cleanly closed but incomplete* recording (events
+dropped under backpressure — a slow or full disk) from a complete one and from a
+crash (no EOCD at all). It is **informational, never gating**: a reader shows the UI
+"incomplete" but still reads the file. The revision that added this field, and the
+decision to *derive* the total event count from the EVENTS blocks rather than store
+it here, were made on day 12 when implementing the writer surfaced the need — a
+deliberate change to an unshipped format, per "the spec is the boss".
 
 ## 6. Block types
 
@@ -146,9 +155,12 @@ count-prefixed so those refinements are additive, never a reframing.
 
 A msgpack map (day 14) with at least these string keys: `chronotrace_version`,
 `format_version` (`[major, minor]`), `python_version`, `platform`,
-`created_unix_ns`, `event_count`, and `config` (the resolved `RecorderConfig`).
-Written first so a reader learns what it holds before touching the body. Until the
-msgpack codec lands, a minimal file MAY carry an empty map (`0x80`).
+`created_unix_ns`, and `config` (the resolved `RecorderConfig`). Written first so a
+reader learns what it holds before touching the body. The total **event count is
+not stored** — it is the sum of the EVENTS blocks' own counts, and the format does
+not store what it can derive (nor could it, honestly, in a block written before any
+event exists). Until the msgpack codec lands (day 14), a file carries an empty map
+(`0x80`); the config snapshot is written then.
 
 ### 6.2 STRINGS
 
@@ -175,14 +187,17 @@ Payload:
    are otherwise non-negative).
 3. Each column is: a u8 `codec`, a u32 `byte_length`, then `byte_length` bytes.
 
-Codecs:
+Codecs (a writer picks the smallest per column; a reader implements all three):
 
-- `0x00` **raw** — `event_count` little-endian `int64` values. Always valid; a
-  reader MUST implement it. This alone makes an EVENTS block decodable in 1.0.
-- `0x01` **delta**, `0x02` **run-length** — compression-friendly encodings a writer
-  MAY choose per column (e.g. delta-of-delta on `seq`, RLE on `code_id`); their
-  exact bytes are fixed with the writer on day 12. A reader implements the codecs
-  it finds; because each column names its codec, a writer never has to use one.
+- `0x00` **raw** — `event_count` little-endian `int64` values. Always valid and the
+  fallback; wins on incompressible columns.
+- `0x01` **rle** — run-length `(value, count)` pairs as little-endian `int64`.
+  Crushes constant columns (`thread_id`, `kind`, the `-1` runs of `name_id`).
+- `0x02` **delta-rle** — run-length of the *consecutive differences*. Crushes
+  monotonic and constant-stride columns: `seq` is `+1`, so its deltas are one long
+  run of `1`. (Plain delta is not a codec: a run of `1`s is still a run of `int64`s
+  and does not shrink pre-zstd, so the run-length is composed in. zstd, day 14,
+  compresses whatever survives.)
 
 ### 6.4 VALUES
 
@@ -285,6 +300,7 @@ A debugger that fsynced every block would have that trade backwards.
 | Case | Behaviour |
 |---|---|
 | Empty recording (0 events) | Valid: header + META + INDEX + EOCD, no EVENTS block. |
+| Dropped events, clean close | Valid; EOCD `flags.TRUNCATED` set. Reader shows "incomplete". |
 | In-progress (no EOCD) | Open read-only via the scan path; recover the written prefix. |
 | Newer `version_major` | Refuse, loudly. |
 | Truncated file | Scan stops at the first short/failed-CRC frame; prefix is intact. |
@@ -295,8 +311,9 @@ A debugger that fsynced every block would have that trade backwards.
 
 ## 12. A minimal valid file
 
-99 bytes: header + one `META` block (payload = msgpack empty map `0x80`) + an
-`INDEX` locating it + EOCD. Generated from the constants, CRCs real:
+103 bytes: header + one `META` block (payload = msgpack empty map `0x80`) + an
+`INDEX` locating it + EOCD. Emitted by `ChronoWriter` with zero events, CRCs real,
+and pinned byte-for-byte by `tests/store/test_writer.py`:
 
 ```
 0000  89 43 48 52 4f 4e 4f 0d 0a 1a 0a 01 00 00 00 00   .CHRONO.........
@@ -304,12 +321,13 @@ A debugger that fsynced every block would have that trade backwards.
 0020  01 00 00 00 01 00 00 00 ad 6c ba 3f 80 0e 00 00   .........l.?....
 0030  00 05 00 00 00 94 9b ef a6 01 00 20 00 00 00 00   ........... ....
 0040  00 00 00 0d 00 00 00 2d 00 00 00 00 00 00 00 1a   .......-........
-0050  00 00 00 00 00 00 00 94 9b ef a6 43 48 52 4f 4e   ...........CHRON
-0060  45 4e 44                                          END
+0050  00 00 00 00 00 00 00 94 9b ef a6 00 00 00 00 43   ...............C
+0060  48 52 4f 4e 45 4e 44                              HRONEND
 ```
 
 Reading it: `magic` at `0x00`; `version_major=1` at `0x0B`; `header_size=32`
 (`0x20`) at `0x17`. The META frame at `0x20` — `payload_length=1`, `type=0x0001`,
 `crc32=3fba6cad`, payload `80`. The INDEX frame at `0x2D` — `payload_length=14`,
 `type=0x0005`, one entry `(type=META, offset=32, length=13)`. The EOCD at `0x47` —
-`index_offset=45`, `index_length=26`, `index_crc32=a6ef9b94`, `magic=CHRONEND`.
+`index_offset=45`, `index_length=26`, `index_crc32=a6ef9b94`, `flags=0`,
+`magic=CHRONEND`.

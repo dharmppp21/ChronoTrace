@@ -96,21 +96,41 @@ trusting the payload -- a crash can leave a plausible length pointing at garbage
 """
 BLOCK_HEADER_SIZE = BLOCK_HEADER.size  # 12
 
-EOCD = struct.Struct("<Q Q I 8s")
-"""End-of-central-directory record, 28 bytes, at the very end of a closed file.
+EOCD = struct.Struct("<Q Q I I 8s")
+"""End-of-central-directory record, 32 bytes, at the very end of a closed file.
 
     index_offset     Q    u64  file offset of the INDEX block's header
     index_length     Q    u64  total bytes of the INDEX block (header + payload)
     index_crc32      I    u32  CRC-32 of the INDEX block's payload (redundant
                                with the block's own CRC; lets a reader trust the
                                pointer before seeking)
+    flags            I    u32  EocdFlag; TRUNCATED means events were dropped
     magic            8s   EOCD_MAGIC
 
 Offsets are u64: a `.chrono` file may be far larger than 4 GiB (ADR-0001 makes
 recordings big), so nothing in the index may be a 32-bit offset. Per-block
 *lengths* stay u32 because a block is a bounded batch of events, never gigabytes.
+
+`flags` gained a field on day 12, when implementing the writer showed that a
+*cleanly closed but incomplete* recording (events dropped under backpressure) is
+distinct from a crash (no EOCD at all) and from a complete one -- and the reader
+must be able to tell the UI which. It is informational, never gating: a reader
+that does not know a `flags` bit still reads the file (unlike a header `flags` bit).
+Total event count is deliberately *not* stored here -- it is the sum of the EVENTS
+blocks' own counts, and the format does not store what it can derive.
 """
-EOCD_SIZE = EOCD.size  # 28
+EOCD_SIZE = EOCD.size  # 32
+
+
+class EocdFlag(enum.IntFlag):
+    """The EOCD `flags` bitfield. Informational; a reader never refuses on these."""
+
+    NONE = 0
+    TRUNCATED = 0x0001
+    """Events were dropped during recording (backpressure: a slow or full disk).
+    The recording is a valid prefix of the truth, not the whole of it; the UI must
+    say so. The user's program was never blocked to prevent this -- see writer.py."""
+
 
 INDEX_ENTRY = struct.Struct("<H Q I")
 """One entry in the INDEX block's payload, 14 bytes -- the location of one block:

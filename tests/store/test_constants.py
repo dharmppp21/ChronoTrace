@@ -86,7 +86,7 @@ def test_struct_sizes_are_pinned() -> None:
     """Literal sizes, so a layout change fails here (the _SIZE consts are derived)."""
     assert c.HEADER.size == 32
     assert c.BLOCK_HEADER.size == 12
-    assert c.EOCD.size == 28
+    assert c.EOCD.size == 32  # grew from 28 on day 12: gained a u32 flags field
     assert c.INDEX_ENTRY.size == 14
 
 

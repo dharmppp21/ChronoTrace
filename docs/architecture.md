@@ -68,7 +68,7 @@ stream (`MemorySink`); Phase 2 (days 11–18) makes it durable.
 | Layer | Status | Built |
 |---|---|---|
 | recorder | **done** | days 4–10 |
-| store | format spec'd ([`docs/format-spec.md`](format-spec.md)); codec next | days 11–18 |
+| store | writer + format ([`docs/format-spec.md`](format-spec.md)); reader next | days 11–18 |
 | index, reconstruct, query, server, frontend | planned | phases 2–5 |
 
 ## The storage format
