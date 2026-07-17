@@ -353,6 +353,42 @@ measured (827 µs/value), and it has a dated owner (day 40) rather than a wish.
 
 ---
 
+## Day 12 — write throughput (`bench_store_write.py`)
+
+`ChronoWriter` turning a recorded event stream into `.chrono` bytes. Events come
+from recording a real workload, so the column distributions are realistic. Sizes
+are **pre-zstd** (compression is day 14); the columnar codecs here exist to make
+zstd's job easy, not to be the compressor.
+
+| workload | events | MB out | B/event | Mevents/s | MB/s |
+|---|---:|---:|---:|---:|---:|
+| tight_loop | 750,007 | 12.00 | 16.00 | 0.13 | 2.1 |
+| json_pipeline | 195,776 | 4.13 | 21.12 | 0.12 | 2.6 |
+| fib_recursive | 600,198 | 18.01 | 30.00 | 0.12 | 3.6 |
+
+Real file + close-time fsync: 750k events, 12.0 MB, 0.13 Mevents/s, 2.2 MB/s --
+i.e. fsync-at-close is free next to the encoding, which is the whole point of not
+fsyncing per block.
+
+**Two honest readings:**
+
+* **16–30 B/event is pre-zstd, and expected.** Day 11 measured columnar **+ zlib**
+  at 0.5–1.2 B/event; the raw columns are larger because the compressor has not run
+  yet. The size is dominated by `timestamp_ns`: its per-line deltas are not constant
+  (each line takes a slightly different time), so delta-rle cannot collapse them —
+  but they are small numbers that zstd compresses well on day 14. seq, kind,
+  thread_id, code_id and the `-1` columns already collapse to a handful of bytes via
+  rle / delta-rle (a column stored raw is caught by `test_columnar`'s size assert).
+* **~130k events/s is encoding-bound, and the writer is currently the slower half.**
+  The recorder emits at ~273k events/s (day 5); the writer's rle/delta passes are
+  Python loops and it tries all three codecs per column. That makes the writer the
+  bottleneck today — a day-40 target (C-level codec passes, or a cheaper per-column
+  selection), recorded rather than optimised speculatively. zstd (day 14) will
+  change this profile, so tuning the codec selection before it lands would be
+  premature.
+
+---
+
 ## Standing budgets
 
 | thing | budget | current | measured |
