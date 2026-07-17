@@ -29,7 +29,7 @@ classifiers = [
     "Typing :: Typed",
 ]
 
-# Deliberately empty, and kept that way as long as possible.
+# Kept minimal on purpose, and paid for by measurement, not reputation.
 #
 # The recorder is imported INTO the process being debugged, so every dependency
 # we take becomes a dependency of the user's program: another entry in their
@@ -38,10 +38,22 @@ classifiers = [
 # A debugger that cannot attach to a project because of a version clash in
 # ITS OWN dependency tree is a debugger nobody keeps installed.
 #
-# Phase 2 adds zstandard + msgpack (day 14) because compression is not something
-# to hand-roll. Phase 5 adds fastapi + uvicorn behind an optional [ui] extra
-# (day 33) precisely so recording stays lean for users who only record.
-dependencies = []
+# The two below are imported only by the `store` layer, never by the recorder
+# (the architecture test enforces that recording stays import-clean), so a user
+# who only records still pays nothing at import time.
+#   zstandard -- block compression. Chosen over stdlib zlib/lzma on day-14
+#     measurements (benchmarks/RESULTS.md): ~3x zlib's ratio on event blocks and
+#     ~25x lzma's compress speed, which the recorder hot path needs. Not
+#     hand-rolled: a compression codec is exactly the thing to take off the shelf.
+#   msgpack -- the value pool's on-disk encoding. Compact, cross-language, and
+#     (unlike pickle, banned at the format level) a pure data codec that constructs
+#     no objects when opening a stranger's recording.
+# Phase 5 adds fastapi + uvicorn behind an optional [ui] extra (day 33) precisely
+# so recording stays lean for users who only record.
+dependencies = [
+    "zstandard>=0.22",
+    "msgpack>=1.0",
+]
 
 [project.urls]
 Homepage = "https://github.com/dharmppp21/ChronoTrace"
@@ -174,6 +186,13 @@ enable_error_code = ["redundant-expr", "possibly-undefined", "truthy-bool"]
 # NOTE: ignore_missing_imports is intentionally NOT set globally. Silencing every
 # unresolved import hides real mistakes. When a dependency genuinely ships no
 # stubs, add a narrow per-module override here and say why.
+
+# msgpack ships no py.typed and no bundled stubs (zstandard does, so it needs no
+# override). Narrowly silenced here rather than globally; the store wraps it in
+# valuepool.py, whose own signatures stay fully typed.
+[[tool.mypy.overrides]]
+module = ["msgpack"]
+ignore_missing_imports = true
 
 # ---------------------------------------------------------------------------
 # Tests
