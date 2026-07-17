@@ -43,6 +43,8 @@ the project: read in order, it explains how each decision forced the next.
 | # | Decision | Status |
 |---|---|---|
 | [0001](0001-recording-strategy.md) | Omniscient recording, not deterministic replay | Accepted |
+| [0002](0002-frame-registry.md) | A live-frame registry, not a call stack | Accepted |
+| [0003](0003-dedup-correctness.md) | Deduplicate values by content, never by identity | Accepted |
 
 ## Baseline decisions not recorded here
 
