@@ -416,11 +416,80 @@ never pays it.
 
 ---
 
+## Day 14 — compression + value pool (`bench_compression.py`)
+
+### The codec, decided by measurement (one real EVENTS block, ~1.8 MB)
+
+| codec | ratio | compress | decompress |
+|---|---:|---:|---:|
+| zlib-9 | 90× | 144 MB/s | 1.9 GB/s |
+| lzma (preset 6) | 525× | **19 MB/s** | 0.5 GB/s |
+| **zstd-9 — SHIPPED** | **285×** | **521 MB/s** | **3.6 GB/s** |
+
+zstd wins outright: ~3× zlib's ratio, and where lzma edges it on ratio it does so at
+**19 MB/s** — 27× slower to compress, disqualifying because EVENTS blocks are
+compressed on the traced program's own thread. zstd's decompress speed is the read
+win the scrubber lives on. zlib is not close, so it is not taken. Level 9 is the
+knee: level 3 is 2× faster for 6× worse ratio, level 19 is 12× slower for no gain.
+
+### Bytes per event — four workloads (columnar + zstd, values included)
+
+| workload | events | values | raw B/ev | **zstd B/ev** | ratio |
+|---|---:|---:|---:|---:|---:|
+| tight_loop | 1,350,015 | 286,371 | 43.5 | **4.2** | 10.5× |
+| fib_recursive | 750,253 | 31 | 41.6 | **2.9** | 14.6× |
+| json_pipeline | 280,997 | 10,621 | 58.6 | **3.4** | 17.1× |
+| io_bound | 766 | 158 | 72.5 | **10.4** | 7.0× |
+
+**~3–10 bytes per event on disk** — against 151 B/event live in `MemorySink` (day 4),
+a 15–50× reduction, and the number Phase 2 existed to produce.
+
+### The two justifications the design owes
+
+**Columnar earns its place (day 12), even after a general compressor runs.** One
+json_pipeline EVENTS block, both layouts then zstd-compressed:
+
+| layout | zstd size |
+|---|---:|
+| naive rows (10 int64s/event) | 509,971 B |
+| **columnar** | **205,647 B** (2.5× smaller) |
+
+Laying like fields together still beats zstd-on-rows by 2.5× — the columns are not
+made redundant by the compressor, they feed it.
+
+**The dictionary does NOT earn its place — so none is shipped.** A trained 8 KB
+dictionary on a real single VALUES block:
+
+| | size |
+|---|---:|
+| no dictionary | 77,582 B |
+| + 8 KB trained dict | 87,954 B (79,762 blob + 8,192 dict) |
+| **net** | **−10,372 B (a loss)** |
+
+A dictionary is a net win only across *many small* blocks that each pay to re-describe
+shared structure. A `.chrono`'s blocks are large (65536 events) and self-contextualise
+through zstd's own window, so an embedded dictionary costs more than it saves on every
+real layout. Deleted, per "if it doesn't earn its place, delete it and say so." Revisit
+only if day 18's block-size sweep pushes blocks small.
+
+### Throughput and bomb safety
+
+Compress ~95–122 MB/s, decompress ~856 MB/s on a real EVENTS block (data-dependent;
+less-compressible blocks are faster). Decompress reads the zstd frame's declared
+content size (a header field), rejects it against the cap *before* allocating, then
+decompresses **one-shot** — measured ~15× faster than a bounded streaming loop, which
+is why streaming was not kept. The guarantee holds regardless: a frame declaring 4 GB
+is refused having touched ~1 KB, and a size-less frame is still bounded one-shot by the
+cap. All of day 13's truncation-sweep and hostile tests stay green with compression on.
+
+---
+
 ## Standing budgets
 
 | thing | budget | current | measured |
 |---|---:|---:|---|
 | 1M events in `MemorySink` | < 400 MB (day 10) | **225 MB** | day 10 |
+| On-disk bytes/event, realistic workload | smaller is better | **3–10 B/event** | day 14 |
 | Recording size, realistic workload | smaller is better | −97.9% | day 8 |
 | Recorder overhead, realistic workload, **flow** | < 20x (ADR-0001 trigger) | **5.4x** | day 9 |
 | Recorder overhead, realistic workload, +capture | < 20x eventually | ~2100x* | day 9 |
