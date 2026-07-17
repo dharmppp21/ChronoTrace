@@ -1,6 +1,6 @@
-"""The `chronotrace` command: run a script under the recorder.
+"""The `chronotrace` command: record a script under the recorder.
 
-`chronotrace run script.py [args...]` executes the target as `__main__` with
+`chronotrace record script.py [args...]` executes the target as `__main__` with
 recording on, scoped by default to the script's own directory. Today the events
 go to an in-memory sink and the command reports a count; day 12 wires the
 file-backed store so recordings persist.
@@ -25,24 +25,24 @@ from chronotrace.recorder.scope import Scope
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """The argument parser. A `run` subcommand leaves room for `replay` (day 30+)."""
+    """The argument parser. A `record` subcommand leaves room for `replay` (day 30+)."""
     parser = argparse.ArgumentParser(prog="chronotrace", description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
 
-    run = sub.add_parser("run", help="record a script's execution")
-    run.add_argument("--include", action="append", metavar="GLOB", help="force a file into scope")
-    run.add_argument("--exclude", action="append", metavar="GLOB", help="force a file out of scope")
-    run.add_argument(
+    rec = sub.add_parser("record", help="record a script's execution")
+    rec.add_argument("--include", action="append", metavar="GLOB", help="force a file into scope")
+    rec.add_argument("--exclude", action="append", metavar="GLOB", help="force a file out of scope")
+    rec.add_argument(
         "--redact", action="append", metavar="GLOB", help="redact locals matching this"
     )
-    run.add_argument(
+    rec.add_argument(
         "--capture-values",
         action=argparse.BooleanOptionalAction,
         default=None,
         help="record local values, not just control flow (default: on)",
     )
-    run.add_argument("script", help="the Python script to record")
-    run.add_argument("script_args", nargs=argparse.REMAINDER, help="arguments passed to the script")
+    rec.add_argument("script", help="the Python script to record")
+    rec.add_argument("script_args", nargs=argparse.REMAINDER, help="arguments passed to the script")
     return parser
 
 

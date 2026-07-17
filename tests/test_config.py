@@ -113,5 +113,5 @@ def test_record_script_redacts_end_to_end(tmp_path: Path, monkeypatch: Any) -> N
 def test_main_returns_zero_and_reports(tmp_path: Path, capsys: Any) -> None:
     script = tmp_path / "app.py"
     script.write_text("x = 1 + 1\n", encoding="utf-8")
-    assert main(["run", str(script)]) == 0
+    assert main(["record", str(script)]) == 0
     assert "recorded" in capsys.readouterr().out
