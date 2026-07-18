@@ -76,6 +76,7 @@ from chronotrace.store.constants import (
     BlockType,
     EocdFlag,
 )
+from chronotrace.store.delta import DELTA_RANGE, Delta, derive, encode_deltas
 from chronotrace.store.framing import encode_block
 from chronotrace.store.keyframe import DEFAULT_KEYFRAME_INTERVAL, KF_SEQ, LiveState
 from chronotrace.store.valuepool import ValuePoolWriter
@@ -103,6 +104,7 @@ class ChronoWriter:
         "_block_events",
         "_buffer",
         "_closed",
+        "_deltas",
         "_index",
         "_interval",
         "_live",
@@ -122,6 +124,7 @@ class ChronoWriter:
         self._block_events = block_events
         self._interval = keyframe_interval
         self._buffer: list[Event] = []
+        self._deltas: list[Delta] = []
         self._live = LiveState()
         self._pool = ValuePoolWriter()
         self._index: list[tuple[int, int, int]] = []  # (block_type, offset, length)
@@ -138,6 +141,9 @@ class ChronoWriter:
         always has a keyframe floor. May raise on a write failure.
         """
         self._buffer.append(event)
+        # Derive deltas from the live state BEFORE folding the event in -- a bind's old
+        # ref is the current binding, which the event is about to overwrite.
+        self._deltas.extend(derive(event, self._live.frames))
         self._live.apply(event)
         if event.seq % self._interval == 0:
             self._emit_keyframe(event.seq)
@@ -200,6 +206,17 @@ class ChronoWriter:
         payload = blob[:COUNT_SIZE] + compress(blob[COUNT_SIZE:])
         self._write_block(BlockType.EVENTS, payload, BlockFlag.COMPRESSED_ZSTD)
         self._buffer.clear()
+        self._flush_deltas()
+
+    def _flush_deltas(self) -> None:
+        if not self._deltas:
+            return
+        # The (first, last) seq span stays uncompressed so the reader answers
+        # deltas_between() by peeking a block's range without decompressing it.
+        span = DELTA_RANGE.pack(self._deltas[0].seq, self._deltas[-1].seq)
+        payload = span + compress(encode_deltas(self._deltas))
+        self._write_block(BlockType.DELTAS, payload, BlockFlag.COMPRESSED_ZSTD)
+        self._deltas.clear()
 
     def _write_block(
         self, block_type: BlockType, payload: bytes, flags: BlockFlag = BlockFlag.NONE

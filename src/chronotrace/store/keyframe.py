@@ -159,6 +159,15 @@ class LiveState:
     def __len__(self) -> int:
         return len(self._frames)
 
+    @property
+    def frames(self) -> dict[int, FrameSnapshot]:
+        """The live frames, keyed by frame_id -- a read-only view for delta derivation.
+
+        `delta.derive` reads the old ref of a bind from it; callers must not mutate it,
+        as the writer owns this state (like `MemorySink.events` owns its list).
+        """
+        return self._frames
+
     def _ensure(self, fid: int, event: Event) -> FrameSnapshot:
         """The frame for `fid`, creating it if its CALL was never seen.
 

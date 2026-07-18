@@ -30,6 +30,7 @@ that direction of knowledge would couple the file format to the mechanics of
 observation, and the two must be free to change independently.
 """
 
+from chronotrace.store.delta import Delta, apply, invert, state_from_keyframe
 from chronotrace.store.errors import (
     ChronoError,
     CorruptRecording,
@@ -45,9 +46,13 @@ __all__ = [
     "ChronoReader",
     "ChronoWriter",
     "CorruptRecording",
+    "Delta",
     "FileSink",
     "FrameSnapshot",
     "Keyframe",
     "TruncatedRecording",
     "UnsupportedVersion",
+    "apply",
+    "invert",
+    "state_from_keyframe",
 ]

@@ -77,6 +77,7 @@ from chronotrace.store.constants import (
     BlockType,
     EocdFlag,
 )
+from chronotrace.store.delta import DELTA_RANGE, DELTA_RANGE_SIZE, Delta, decode_deltas
 from chronotrace.store.errors import CorruptRecording, TruncatedRecording, UnsupportedVersion
 from chronotrace.store.framing import BlockError, decode_block
 from chronotrace.store.keyframe import KF_SEQ, KF_SEQ_SIZE, Keyframe, decode_keyframe
@@ -104,6 +105,7 @@ class ChronoReader:
         "_cache",
         "_cache_blocks",
         "_count",
+        "_delta_blocks",
         "_file",
         "_keyframes",
         "_mmap",
@@ -133,6 +135,7 @@ class ChronoReader:
         self._values_offset: int | None = None
         self._pool: list[bytes] | None = None  # the decoded value pool, decoded once, lazily
         self._keyframes: list[tuple[int, int]] = []  # (seq, block_offset), sorted by seq
+        self._delta_blocks: list[tuple[int, int, int]] = []  # (first_seq, last_seq, offset)
         self._validate_header()
         self._build_index()
 
@@ -190,6 +193,7 @@ class ChronoReader:
         self._count = seq
         self._starts = [start for start, *_ in self._blocks]
         self._keyframes.sort()  # emitted in seq order, but sort defends a rewritten index
+        self._delta_blocks.sort()
 
     # -- index: footer (lazy) or scan (crash recovery) ----------------------
     #
@@ -224,6 +228,8 @@ class ChronoReader:
                     self._values_offset = offset
             elif entry_type == BlockType.KEYFRAMES:
                 self._record_keyframe(offset, length)
+            elif entry_type == BlockType.DELTAS:
+                self._record_delta_block(offset, length)
             elif entry_type == BlockType.EVENTS:
                 count = self._safe_count(offset, length)
                 if count is None:
@@ -256,6 +262,8 @@ class ChronoReader:
                 self._values_offset = pos
             elif block_type == BlockType.KEYFRAMES:
                 self._record_keyframe(pos, nxt - pos)
+            elif block_type == BlockType.DELTAS:
+                self._record_delta_block(pos, nxt - pos)
             pos = nxt
         return locations
 
@@ -268,6 +276,16 @@ class ChronoReader:
             return
         kf_seq = int(KF_SEQ.unpack_from(self._buf, start)[0])
         self._keyframes.append((kf_seq, offset))
+
+    def _record_delta_block(self, offset: int, length: int) -> None:
+        """Index a DELTAS block by its peeked (first_seq, last_seq), skipping if OOB."""
+        if not self._in_bounds(offset, length):
+            return
+        start = offset + BLOCK_HEADER_SIZE
+        if start + DELTA_RANGE_SIZE > len(self._buf):
+            return
+        first, last = DELTA_RANGE.unpack_from(self._buf, start)
+        self._delta_blocks.append((int(first), int(last), offset))
 
     def _in_bounds(self, offset: int, length: int) -> bool:
         return (
@@ -415,6 +433,38 @@ class ChronoReader:
             return decode_keyframe(raw, seq)  # allocations bounded (keyframe.py)
         except (BlockError, ValueError, struct.error) as exc:
             raise CorruptRecording(f"keyframe at offset {offset}: {exc}") from exc
+
+    # -- deltas -------------------------------------------------------------
+
+    def deltas_between(self, seq_a: int, seq_b: int) -> list[Delta]:
+        """The invertible deltas with `seq_a <= seq <= seq_b`, in `seq` order.
+
+        This is the second half of the codec: from a keyframe at or before `seq_a`,
+        applying these reaches any instant in the span, and inverting them steps back.
+        Only the DELTAS blocks whose stored span overlaps `[seq_a, seq_b]` are decoded,
+        so a bounded query (a keyframe interval) touches a bounded number of blocks --
+        which is what keeps reconstruction cost bounded.
+
+        Complexity: O(overlapping blocks x block size). For a within-interval span that
+        is one or two blocks.
+        """
+        out: list[Delta] = []
+        for first, last, offset in self._delta_blocks:
+            if first > seq_b:
+                break  # sorted by first_seq: no later block can overlap
+            if last < seq_a:
+                continue
+            out.extend(d for d in self._decode_delta_block(offset) if seq_a <= d.seq <= seq_b)
+        return out
+
+    def _decode_delta_block(self, offset: int) -> list[Delta]:
+        try:
+            _bt, flags, payload, _next = decode_block(self._buf, offset)  # CRC-checked
+            body = payload[DELTA_RANGE_SIZE:]  # drop the uncompressed (first, last) span
+            raw = decompress(body) if flags & BlockFlag.COMPRESSED_ZSTD else body
+            return decode_deltas(raw)  # allocations bounded (delta.py)
+        except (BlockError, ValueError, struct.error) as exc:
+            raise CorruptRecording(f"delta block at offset {offset}: {exc}") from exc
 
     # -- lifecycle ----------------------------------------------------------
 

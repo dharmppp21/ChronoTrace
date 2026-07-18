@@ -51,20 +51,20 @@ FORMAT_VERSION_MAJOR = 1
 """Incompatible-change counter. A reader MUST refuse a file whose major exceeds
 its own -- the layout may have changed in ways it cannot parse."""
 
-FORMAT_VERSION_MINOR = 2
+FORMAT_VERSION_MINOR = 3
 """Backward-compatible-addition counter. A reader MAY open a file with a higher
 minor than its own: new *optional* blocks are skippable and new header fields live
 past `header_size`. It MUST NOT guess at anything it does not recognise.
 
 * 1 (day 14) activated the `COMPRESSED_ZSTD` block flag (reserved in 1.0) and made
   the VALUES section real msgpack.
-* 2 (day 15) activated the optional `KEYFRAMES` block (reserved in 1.0): periodic
-  snapshots of live state. Because the block is *optional* (top bit set), a 1.1
-  reader that predates keyframes skips it and still reads every event -- which is
-  exactly what an optional block is for, and why this is a minor bump, not a major.
+* 2 (day 15) added the optional `KEYFRAMES` block: periodic snapshots of live state.
+* 3 (day 16) added the optional `DELTAS` block: invertible state transitions between
+  keyframes. Optional again, so a reader that predates it skips the block and can
+  still reconstruct forward from the events -- a minor bump, not a major.
 
-A 1.2 reader reads 1.0 and 1.1 files unchanged; an older reader opening a 1.2 file
-skips the KEYFRAMES blocks it does not know and loses only fast seek, not data."""
+A current reader reads every earlier file unchanged; an older reader opening a newer
+file skips the optional blocks it does not know and loses only fast seek, not data."""
 
 # ---------------------------------------------------------------------------
 # Fixed structures. Field order is the on-disk order; `<` is little-endian.
@@ -194,6 +194,13 @@ class BlockType(enum.IntEnum):
     """Optional (day 15): periodic full-state snapshots that make reaching a past
     instant O(nearest keyframe + bounded deltas). Optional so a v1.0 reader that
     predates keyframes can still open a file that has them, ignoring this block."""
+
+    DELTAS = 0x8002
+    """Optional (day 16): the invertible state transitions (bind, frame enter/exit)
+    between keyframes -- old and new refs, so a reader can step backward without
+    replaying from a keyframe. Optional because deltas are *derivable* from the events
+    forward; the block adds the stored old refs (backward stepping) and saves the
+    derivation. A reader that does not understand it skips it and reconstructs forward."""
 
 
 OPTIONAL_BLOCK_BIT = 0x8000

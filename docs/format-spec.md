@@ -1,16 +1,17 @@
 # The `.chrono` file format — normative specification
 
-**Format version 1.2.** This document defines the on-disk `.chrono` format
+**Format version 1.3.** This document defines the on-disk `.chrono` format
 precisely enough to implement a reader or writer in any language. Where it and the
 code disagree, this document is the contract; `src/chronotrace/store/constants.py`
 is its machine form and `tests/store/test_constants.py` pins the byte layout.
 
 Version history: **1.1** (day 14) activated per-block zstd compression (the
 `COMPRESSED_ZSTD` flag reserved in 1.0) and made the VALUES section real msgpack.
-**1.2** (day 15) activated the optional `KEYFRAMES` block ([§6.6](#66-keyframes)):
-periodic snapshots of live state for O(log K) seek. Each was a backward-compatible
-addition a current reader handles and older files never carry; see
-[§8 Evolution](#8-evolution).
+**1.2** (day 15) added the optional `KEYFRAMES` block ([§6.6](#66-keyframes)):
+periodic snapshots of live state for O(log K) seek. **1.3** (day 16) added the
+optional `DELTAS` block ([§6.7](#67-deltas)): the invertible state transitions
+between keyframes. Each was a backward-compatible addition a current reader handles
+and older files never carry; see [§8 Evolution](#8-evolution).
 
 A recording that exists in the wild makes this format a compatibility contract, so
 the rules in [§8 Evolution](#8-evolution) are as binding as the byte layouts.
@@ -57,7 +58,7 @@ that the writer was killed mid-recording; see [§7 Reading](#7-reading).
 |---:|---:|---|---|---|
 | 0 | 11 | bytes | `magic` | `89 43 48 52 4F 4E 4F 0D 0A 1A 0A` (`\x89CHRONO\r\n\x1a\n`) |
 | 11 | 2 | u16 | `version_major` | `1` |
-| 13 | 2 | u16 | `version_minor` | `2` |
+| 13 | 2 | u16 | `version_minor` | `3` |
 | 15 | 8 | u64 | `flags` | feature bitfield ([§8](#8-evolution)); `0` in 1.0 |
 | 23 | 2 | u16 | `header_size` | `32` — offset at which the first block begins |
 | 25 | 7 | — | *reserved* | zero |
@@ -166,6 +167,7 @@ than guess. Tag values are permanent and never reused.
 | `0x0004` | `VALUES` | required | content-addressed value pool ([§6.4](#64-values)) |
 | `0x0005` | `INDEX` | required | block directory ([§6.5](#65-index)) |
 | `0x8001` | `KEYFRAMES` | optional | live-state snapshots for fast seek ([§6.6](#66-keyframes)) |
+| `0x8002` | `DELTAS` | optional | invertible state transitions between keyframes ([§6.7](#67-deltas)) |
 
 `block_flags` (u16) defines one bit, `COMPRESSED_ZSTD = 0x0001` (§4): the payload is a
 zstd compression frame. A reader that does not implement it MUST refuse the block
@@ -296,6 +298,38 @@ The set of live frames is the day-6 registry model: a frame is live from CALL un
 RETURN/UNWIND, and YIELD **suspends** rather than ends it, so a suspended generator's
 frame — and its locals — stay in the snapshot.
 
+### 6.7 DELTAS
+
+Optional (1.3). A **delta** is exactly what changed between two instants. Keyframes
+(§6.6) are the floor; deltas carry reconstruction from a keyframe to any `seq`, and —
+because a bind delta stores the **old** ref as well as the new — back again. State at
+`seq` S = the nearest keyframe at or before S, plus the deltas from there to S applied;
+one step backward is one delta *inverted*, never a rewind to a keyframe. A DELTAS block
+holds the deltas for a run of events, and the deltas are **derivable from the events**
+forward (bind ← VAR_WRITE, enter ← CALL, exit ← RETURN/UNWIND) — the block adds the
+stored old refs (for backward stepping) and saves the derivation, which is why it is
+optional.
+
+A delta has one of three kinds: **bind** (a local binding changed:
+`frame_id, name_id, old_ref, new_ref`, where either ref may be the sentinel `-1` for a
+created or deleted binding); **frame-enter** (a frame became live); **frame-exit** (a
+frame left, carrying the bindings it had so it can be inverted back into being). Payload:
+
+- `[u64 first_seq][u64 last_seq]` — the block's seq span, uncompressed, so a reader
+  finds the blocks overlapping a query without decompressing them.
+- then the compression frame (§4) over: `[u32 delta_count]`, seven columns
+  (`kind, seq, frame_id, name_id, old_ref, new_ref, local_count`) encoded exactly as
+  EVENTS columns (§6.3), then `[u32 pair_count]` and two more columns
+  (`name_id, value_ref`) holding the frame-exit locals back to back, `local_count[i]`
+  of them belonging to delta *i*.
+
+Every write is kept — reconstruction can land on any `seq`, so no event is discarded;
+only the *bytes* are compressed (columns of one kind, runs of `-1`, then zstd). A
+reader MUST bound `delta_count` and `pair_count`, and check that the per-delta local
+counts sum to `pair_count`, before allocating. A binding whose `new_ref` is `-1` is a
+deletion; the recorder does not currently observe `del x` (it scans `f_locals`), but
+the model supports deletion because inverting a *creation* produces one.
+
 ## 7. Reading
 
 **Clean open.** Read the last 32 bytes as an EOCD. If `magic == CHRONEND` and the
@@ -347,9 +381,10 @@ values were added by activating a reserved block flag and filling in two payload
 encodings, then bumping the minor. No framing changed. **1.2 (day 15)** added
 keyframes by activating the reserved optional `KEYFRAMES` block type and bumping the
 minor again — and because that block is *optional*, a 1.1 reader that predates
-keyframes skips it and still reads every event, losing only fast seek. Both changes
-were disciplined exactly as this section requires: a reserved slot and a minor bump,
-never a silent reinterpretation of existing bytes.
+keyframes skips it and still reads every event, losing only fast seek. **1.3 (day 16)**
+added the optional `DELTAS` block the same way. Every change was disciplined exactly as
+this section requires: a reserved slot and a minor bump, never a silent reinterpretation
+of existing bytes.
 
 ## 9. Security
 
@@ -397,7 +432,7 @@ A debugger that fsynced every block would have that trade backwards.
 and pinned byte-for-byte by `tests/store/test_writer.py`:
 
 ```
-0000  89 43 48 52 4f 4e 4f 0d 0a 1a 0a 01 00 02 00 00   .CHRONO.........
+0000  89 43 48 52 4f 4e 4f 0d 0a 1a 0a 01 00 03 00 00   .CHRONO.........
 0010  00 00 00 00 00 00 00 20 00 00 00 00 00 00 00 00   ....... ........
 0020  01 00 00 00 01 00 00 00 ad 6c ba 3f 80 0e 00 00   .........l.?....
 0030  00 05 00 00 00 94 9b ef a6 01 00 20 00 00 00 00   ........... ....
@@ -406,7 +441,7 @@ and pinned byte-for-byte by `tests/store/test_writer.py`:
 0060  48 52 4f 4e 45 4e 44                              HRONEND
 ```
 
-Reading it: `magic` at `0x00`; `version_major=1` at `0x0B`, `version_minor=2` at
+Reading it: `magic` at `0x00`; `version_major=1` at `0x0B`, `version_minor=3` at
 `0x0D`; `header_size=32` (`0x20`) at `0x17`. The META frame at `0x20` —
 `payload_length=1`, `type=0x0001`, `crc32=3fba6cad`, payload `80` (an empty msgpack
 map; too small to compress, so it is stored uncompressed with no flag). The INDEX
