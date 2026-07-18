@@ -81,6 +81,7 @@ from chronotrace.store.delta import DELTA_RANGE, DELTA_RANGE_SIZE, Delta, decode
 from chronotrace.store.errors import CorruptRecording, TruncatedRecording, UnsupportedVersion
 from chronotrace.store.framing import BlockError, decode_block
 from chronotrace.store.keyframe import KF_SEQ, KF_SEQ_SIZE, Keyframe, decode_keyframe
+from chronotrace.store.recovery import walk_blocks
 from chronotrace.store.valuepool import decode_pool, unpack_value
 
 DEFAULT_CACHE_BLOCKS = 8
@@ -238,33 +239,27 @@ class ChronoReader:
         return locations, bool(flags & EocdFlag.TRUNCATED)
 
     def _blocks_from_scan(self) -> list[tuple[int, int]]:
-        """Recover EVENTS blocks by walking frames from the header, CRC-checking each.
+        """Recover EVENTS blocks by walking intact frames from the header (crash path).
 
-        Stops at the first torn block. The crash path; it touches every page, unlike
-        the footer path -- which is why it is the fallback, not the default. VALUES and
-        keyframes are written along the way, so a crashed file may carry the keyframes
-        emitted before the crash even without a footer.
+        Delegates the CRC-checked frame walk and torn-tail classification to
+        `recovery.walk_blocks` -- the one place that logic lives -- then indexes the
+        surviving blocks by type. VALUES, keyframes and deltas written before the crash
+        are recovered too, so seeking still works on a crashed recording.
         """
-        buf, size = self._buf, len(self._buf)
+        blocks, _status = walk_blocks(self._buf)
         locations: list[tuple[int, int]] = []
-        pos = HEADER_SIZE
-        while pos < size:
-            try:
-                block_type, _flags, _payload, nxt = decode_block(buf, pos)
-            except BlockError:
-                break  # torn tail: the recovered prefix ends here
+        for offset, block_type, _flags, nxt in blocks:
             if block_type == BlockType.EVENTS:
-                count = self._safe_count(pos, nxt - pos)
+                count = self._safe_count(offset, nxt - offset)
                 if count is None:
-                    break  # a CRC-valid but impossible block: stop at the good prefix
-                locations.append((pos, count))
+                    break  # a CRC-valid but impossible count: stop at the good prefix
+                locations.append((offset, count))
             elif block_type == BlockType.VALUES:
-                self._values_offset = pos
+                self._values_offset = offset
             elif block_type == BlockType.KEYFRAMES:
-                self._record_keyframe(pos, nxt - pos)
+                self._record_keyframe(offset, nxt - offset)
             elif block_type == BlockType.DELTAS:
-                self._record_delta_block(pos, nxt - pos)
-            pos = nxt
+                self._record_delta_block(offset, nxt - offset)
         return locations
 
     def _record_keyframe(self, offset: int, length: int) -> None:

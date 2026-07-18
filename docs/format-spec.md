@@ -344,15 +344,35 @@ by **scanning** from offset `header_size`:
 pos = header_size
 while file has ≥ 12 bytes at pos:
     read the 12-byte frame at pos
-    if payload_length > bytes_remaining_after_frame:  break   # torn tail
-    if crc32(payload) != payload_crc32:               break   # torn tail
+    if payload_length > bytes_remaining_after_frame:  stop   # torn tail (partial)
+    if crc32(payload) != payload_crc32:               stop   # torn tail (corrupt)
     accept this block; index it in memory
     pos += 12 + payload_length
 ```
 
-The accepted blocks are the recoverable prefix; a partially-written final block is
-detected and dropped. This same path serves live tailing of an in-progress
-recording.
+The accepted blocks are the recoverable prefix; this same path serves live tailing of
+an in-progress recording.
+
+**Tail classification (normative).** When the walk stops, exactly one case holds, and a
+reader MUST treat them alike — return the valid prefix, flag the recording truncated:
+
+| Case | Condition at `pos` | Meaning |
+|---|---|---|
+| **clean** | `pos` equals EOF | nothing was torn |
+| **partial** | fewer than 12 bytes remain, **or** `payload_length` reads past EOF | the final block was half-written |
+| **corrupt** | a full block is present but its `payload_crc32` fails | a torn payload, or garbage |
+
+A reader MUST **discard** a partial or corrupt final block whole — never partially
+decode it. Salvaging half a block is forbidden: you cannot know which fields survived,
+and a debugger that shows *invented* state is worse than one that shows less. A torn
+`payload_length` (e.g. reading as gigabytes) MUST be compared against the bytes that
+remain and never used to allocate or read.
+
+**Repair.** A tool MAY rewrite a recovered recording's footer so later opens are O(1)
+(a fresh INDEX over the surviving blocks plus an EOCD). It MUST NOT modify the original
+in place — write a new file and swap atomically, so a failed repair cannot destroy the
+only copy of an irreproducible bug — and MUST keep `flags.TRUNCATED` set: the recording
+is still an incomplete prefix.
 
 **Crash-recovery guarantee, in one sentence:** *every block whose 12-byte frame is
 present and whose payload CRC validates is readable; a crash truncates the file to
@@ -402,14 +422,19 @@ recording" into "run this attacker's code"; that door is closed by construction.
 
 ## 10. Durability
 
-The writer does **not** `fsync` per block. It writes through the OS page cache and
-`fsync`s once, immediately before the EOCD, so a *cleanly closed* file is durable.
-The crash guarantee in §7 does not depend on `fsync`: whatever bytes reached disk
-are self-framed and CRC-checked, so the prefix is structurally valid either way. A
-`kill -9` loses nothing (the page cache survives process death); only a power loss
-or kernel panic can drop unflushed tail blocks, and losing the last few events of a
-*debug artifact* is an acceptable price for not halving the traced program's speed.
-A debugger that fsynced every block would have that trade backwards.
+The writer does **not** `fsync` per block. It **does** `flush` each block to the OS
+page cache as it completes (not leaving it in the process's own buffer), and `fsync`s
+once, immediately before the EOCD, so a *cleanly closed* file is durable. The crash
+guarantee in §7 does not depend on `fsync`: whatever bytes reached the page cache are
+self-framed and CRC-checked, so the prefix is structurally valid either way. A
+`kill -9`/`TerminateProcess` loses nothing beyond a half-written final block (the page
+cache belongs to the kernel and survives process death — which is exactly why the
+per-block flush matters); only a power loss or kernel panic can drop unflushed tail
+blocks, and losing the last few events of a *debug artifact* is an acceptable price for
+not halving the traced program's speed. Recovery (§7) is what makes this trade sound:
+because a torn tail is always detectable and the prefix always intact, skipping the
+per-block `fsync` costs at most a few final events, never the recording. A debugger
+that fsynced every block would have that trade backwards.
 
 ## 11. Edge cases
 

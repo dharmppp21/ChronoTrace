@@ -76,6 +76,16 @@ Dependencies point one way only: `server → query → reconstruct → index →
 recorder`, enforced by an import-graph test. See
 [`docs/architecture.md`](docs/architecture.md) and the [ADR log](docs/adr/).
 
+**Recordings survive crashes.** A debugger records programs that crash — so a recording
+must be readable when the process is killed mid-write, not only after a clean exit. Each
+block is framed with a length and a CRC and flushed to the OS as it completes, so a
+recovery scan returns the intact prefix and discards the torn tail whole (never a
+half-decoded, invented event). The proof is a test that spawns real recording processes,
+kills them (`SIGKILL`/`TerminateProcess`) at random instants, and asserts every file
+still opens — `tests/store/test_crash_real.py` (set `CHRONOTRACE_KILL_ITERS=100` for the
+full run). `chronotrace repair rec.chrono` rebuilds a footer for a crashed recording
+without ever modifying the original in place.
+
 | Capability | Phase | Status |
 |---|---|---|
 | Recording (lines, calls, values, exceptions) | 1 | **done** |

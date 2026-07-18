@@ -1,13 +1,13 @@
-"""The `chronotrace` command: record a script under the recorder.
+"""The `chronotrace` command: record a script, and repair a crashed recording.
 
 `chronotrace record script.py [args...]` executes the target as `__main__` with
-recording on, scoped by default to the script's own directory. Today the events
-go to an in-memory sink and the command reports a count; day 12 wires the
-file-backed store so recordings persist.
+recording on, scoped by default to the script's own directory. `chronotrace repair
+rec.chrono` rebuilds the footer of a recording whose writer was killed mid-write, so
+later opens are O(1) again -- and reports the truncation, because a recovered recording
+is incomplete and the user must never be told otherwise.
 
-Stdlib `argparse`, not a CLI framework: four flags and one positional do not
-justify a dependency the recorder's process would then carry (see the zero-deps
-note in pyproject.toml).
+Stdlib `argparse`, not a CLI framework: a handful of flags do not justify a dependency
+the recorder's process would then carry (see the zero-deps note in pyproject.toml).
 """
 
 from __future__ import annotations
@@ -22,6 +22,7 @@ from chronotrace.config import RecorderConfig, find_pyproject, load_config
 from chronotrace.recorder import MemorySink, Recorder
 from chronotrace.recorder.redact import Redactor
 from chronotrace.recorder.scope import Scope
+from chronotrace.store import ChronoError, ChronoReader, repair
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -43,6 +44,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     rec.add_argument("script", help="the Python script to record")
     rec.add_argument("script_args", nargs=argparse.REMAINDER, help="arguments passed to the script")
+
+    rep = sub.add_parser("repair", help="rebuild the footer of a crash-truncated recording")
+    rep.add_argument("file", help="the .chrono file to repair")
+    rep.add_argument(
+        "--out",
+        metavar="FILE",
+        help="write the repaired copy here; default swaps the original in place, atomically",
+    )
     return parser
 
 
@@ -80,18 +89,44 @@ def record_script(
         sys.argv = saved_argv
 
 
-def main(argv: list[str] | None = None) -> int:
-    """Parse arguments, record, and report. Returns a process exit code."""
-    args = build_parser().parse_args(argv)
+def repair_recording(path: str, out: str | None) -> int:
+    """Report a recording's truncation and rebuild its footer. Returns an exit code.
 
-    cli_overrides = {
-        "include": args.include,
-        "exclude": args.exclude,
-        "redact": args.redact,
-        "capture_values": args.capture_values,
-    }
-    config = load_config(pyproject=find_pyproject(), env=os.environ, cli=cli_overrides)
+    Opens the recording first (recovering a crashed prefix), so the count and truncation
+    it reports are the real recovered ones. A recording that is already intact is left
+    untouched -- `repair` is idempotent.
+    """
+    src = Path(path)
+    try:
+        with ChronoReader.open(src) as reader:
+            events, truncated = len(reader), reader.truncated
+    except ChronoError as exc:
+        print(f"chronotrace: cannot read {src}: {exc}", file=sys.stderr)  # noqa: T201
+        return 1
+    if not truncated:
+        print(f"chronotrace: {src} is intact ({events:,} events); nothing to repair.")  # noqa: T201
+        return 0
+    dst = repair(src, out)  # atomic; never modifies the original unless it IS the target
+    print(  # noqa: T201
+        f"chronotrace: recovered {events:,} events from a crash-truncated recording and "
+        f"wrote a valid footer to {dst}. The recording is still incomplete -- the crash "
+        f"lost its tail -- and stays flagged truncated."
+    )
+    return 0
 
+
+def record_command(args: argparse.Namespace) -> int:
+    """Record the target script into an in-memory sink and report the event count."""
+    config = load_config(
+        pyproject=find_pyproject(),
+        env=os.environ,
+        cli={
+            "include": args.include,
+            "exclude": args.exclude,
+            "redact": args.redact,
+            "capture_values": args.capture_values,
+        },
+    )
     sink = MemorySink()
     record_script(args.script, args.script_args, config, sink)
 
@@ -104,6 +139,14 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
     return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Parse arguments and dispatch to the chosen subcommand. Returns a process exit code."""
+    args = build_parser().parse_args(argv)
+    if args.command == "repair":
+        return repair_recording(args.file, args.out)
+    return record_command(args)
 
 
 if __name__ == "__main__":
