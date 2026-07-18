@@ -224,6 +224,11 @@ class ChronoWriter:
         block = encode_block(block_type, payload, flags)
         offset = self._offset
         self._write(block)  # may raise; index entry is recorded only after success
+        # Flush the completed block to the OS (not fsync). This is the durability half
+        # of the crash guarantee: a block in the OS page cache survives a kill -9 (the
+        # kernel owns the cache), so recovery.walk_blocks can recover it. fsync is still
+        # deliberately skipped -- see ADR-0004 and store/recovery.py.
+        self._stream.flush()
         self._index.append((block_type, offset, len(block)))
 
     def _write(self, data: bytes) -> None:
