@@ -38,8 +38,9 @@ This runs the target under the recorder and reports the event count. The recorde
 - **No secrets** — locals named like `*password*`, `*token*`, `*secret*` are
   withheld *before* they are read, never scrubbed after.
 
-Recordings currently live in memory only (`MemorySink`); **Phase 2 makes them
-durable.**
+The `record` command reports to an in-memory sink today; **Phase 2 (below) built the
+durable, crash-recoverable `.chrono` store** the recorder writes into, and wiring it
+behind `record` is the next step.
 
 ## Overhead, measured not boasted
 
@@ -86,10 +87,27 @@ still opens — `tests/store/test_crash_real.py` (set `CHRONOTRACE_KILL_ITERS=10
 full run). `chronotrace repair rec.chrono` rebuilds a footer for a crashed recording
 without ever modifying the original in place.
 
+**The `.chrono` format, measured.** A versioned, CRC-framed, zstd-compressed columnar
+log with keyframe+delta state encoding — the full byte layout is
+[`docs/format-spec.md`](docs/format-spec.md), and every default was chosen by grid search
+against a stated objective ([ADR-0005](docs/adr/0005-storage-defaults.md)), not taste:
+
+| Metric | Value | |
+|---|---:|---|
+| On-disk size | **~5 bytes/event** | vs 151 B/event live in RAM |
+| Random access to any `seq` | **~9 ms cold**, ~1 µs cached | decodes one 4096-event block |
+| State reconstruction at any instant | **~2.7 ms** | nearest keyframe + ≤ 1000 deltas |
+| Backward step | **1 delta inverted** | O(1), never a rewind to a keyframe |
+
+The block-size choice is a 15× random-access speedup over the naive compression optimum
+— the curve is [`benchmarks/plots/block_size.svg`](benchmarks/plots/block_size.svg), and
+the interval tradeoff is
+[`keyframe_interval.svg`](benchmarks/plots/keyframe_interval.svg).
+
 | Capability | Phase | Status |
 |---|---|---|
 | Recording (lines, calls, values, exceptions) | 1 | **done** |
-| `.chrono` format (framed, zstd, columnar) | 2 | planned |
+| `.chrono` format (framed, zstd, columnar, keyframe+delta, crash-recoverable) | 2 | **done** |
 | Backward stepping / scrubbing | 3 | planned |
 | Causal queries ("who last wrote to `total`?") | 4 | planned |
 | Timeline UI | 5 | planned |

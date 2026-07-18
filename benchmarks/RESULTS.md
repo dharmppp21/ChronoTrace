@@ -556,6 +556,71 @@ over random states and deltas.
 
 ---
 
+## Day 18 — the three-knob grid, and Checkpoint 2 (`bench_grid.py`)
+
+Objective, stated so the defaults are not just numbers: **minimise random-access +
+reconstruction latency, subject to a file-size ceiling of ~+10%.** Scrubbing is the
+product; storage is cheap. Curves in [`plots/`](plots/); full reasoning in
+[ADR-0005](../docs/adr/0005-storage-defaults.md).
+
+### Block size — the dominant knob (random access decodes a whole block)
+
+Measured on a recording larger than the reader's LRU (a small file hides the cost — its
+blocks all cache):
+
+| block | random access | scrub | file (B/event) |
+|---:|---:|---:|---:|
+| 1024 | 2.2 ms | 0.40 Mev/s | 5.80 |
+| **4096 — chosen** | **8.7 ms** | 0.38 Mev/s | **5.01** |
+| 16384 | 34 ms | 0.37 Mev/s | 4.68 |
+| 65536 (old default) | **133 ms** | 0.60 Mev/s | 4.58 |
+
+Random access grows ~linearly with block size (~2.1 µs/event). **4096 is a 15× faster
+cold random access than the old 65536, for +9% file** — and 133 ms per jump made
+scrubbing unusable. This is the headline Phase-2 tuning change.
+
+### Keyframe interval (at block 4096) — reconstruction vs file overhead
+
+| interval | reconstruction | file overhead |
+|---:|---:|---:|
+| 200 | 2.5 ms | +20.0% |
+| **1000 — chosen** | **2.7 ms** | **+4.0%** |
+| 5000 | 5.0 ms | +0.8% |
+| 25000 | 12.6 ms | +0.2% |
+
+1000 is the knee. *Measured first at block 65536 the curve was flat (~42 ms everywhere):
+reconstruction was dominated by decoding one huge DELTAS block, not the deltas applied —
+`block_events` is the real latency knob. Investigated, not shipped as-is (ADR-0005).*
+
+### Compression level — the ratio/speed knee
+
+| level | file (B/event) | write |
+|---:|---:|---:|
+| 3 | 5.28 | 0.19 Mev/s |
+| **9 — chosen** | **4.58** | **0.17 Mev/s** |
+| 19 | 4.21 | 0.08 Mev/s |
+
+Level 19 is 2× slower to write for 8% smaller — a bad trade on the recorder's hot path.
+
+### Deleted / kept on evidence
+
+The trained dictionary was **deleted** (Day 14, net-negative). The three integer codecs
+were **measured and kept**: `rle` 60% of columns, `raw` 30%, `delta-rle` 10% — and
+delta-rle crushes the monotonic `seq` column to ~6 KB total. Each earns its place.
+
+### The FileSink-vs-MemorySink regression, quantified (Checkpoint item)
+
+Replacing `MemorySink` (a `list.append`) with `FileSink` adds **+240% / 3.94 µs/event**
+of store work on the recording thread — columnar encode + zstd compress + delta
+derivation + keyframe snapshots, amortized per block flush. **Acceptable:** it is the
+price of a durable, compressed, seekable, crash-recoverable log, `MemorySink` does not
+persist so it is not a real alternative, and the smaller 4096-block default did *not*
+worsen it (compress cost is bytes-proportional, not block-count). Reversal trigger: a
+background-writer thread (already noted in `writer.py`) if compression is ever measured
+to gate a traced program unacceptably.
+
+---
+
 ## Standing budgets
 
 | thing | budget | current | measured |
