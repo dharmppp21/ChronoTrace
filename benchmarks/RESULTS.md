@@ -523,6 +523,39 @@ search plus one small block decode — which is the per-drag cost the scrubber p
 
 ---
 
+## Day 16 — deltas: bytes per delta and the price of invertibility (`bench_delta.py`)
+
+A delta is what changed between two instants. Keyframes give reconstruction a floor;
+deltas carry it to any `seq` and, because they store the **old** ref as well as the
+new, back again. Derived from a real recording (json_pipeline), encoded columnar, and
+zstd-compressed -- the on-disk form:
+
+| | value |
+|---|---:|
+| events → deltas | 280,995 → **102,077** (85k bind, 8.4k enter, 8.4k exit) |
+| encoded raw | 46.5 B/delta |
+| encoded + zstd | **1.90 B/delta** (24× smaller — columns of one kind, runs of `NO_REF`, then zstd) |
+
+**The price of invertibility is +0.15 B/delta (+9%).** Storing the old ref alongside
+the new — the whole reason a delta is reversible — costs 9% of the compressed delta
+section (the old-ref column is highly repetitive, so zstd nearly erases it):
+
+| delta section | size | per delta |
+|---|---:|---:|
+| forward-only (new ref only) | 178,384 B | 1.75 B |
+| **invertible (old + new) — SHIPPED** | 194,059 B | **1.90 B** |
+| cost of `old_ref` | **+15,675 B** | **+0.15 B (+9%)** |
+
+**Defended, easily.** For +9% of the delta section, every backward step becomes O(1) —
+`invert(state, delta)` — instead of O(interval): a forward-only delta forces each
+backward step to rewind to the previous keyframe and replay forward to the target
+minus one (up to `interval` deltas). A time-travel debugger steps backward constantly;
+paying 0.15 B/delta to make that a single operation is the trade the phase exists to
+make. The referee that guarantees it is a property test: `invert(apply(s, d)) == s`
+over random states and deltas.
+
+---
+
 ## Standing budgets
 
 | thing | budget | current | measured |
@@ -531,6 +564,8 @@ search plus one small block decode — which is the per-drag cost the scrubber p
 | On-disk bytes/event, realistic workload | smaller is better | **3–10 B/event** | day 14 |
 | Reconstruction replay bound (default interval) | latency contract | **≤ 1,000 events** | day 15 |
 | Keyframe file overhead (default interval) | small | **+5.3%** | day 15 |
+| On-disk bytes per delta | smaller is better | **1.90 B/delta** | day 16 |
+| Cost of invertibility (storing `old_ref`) | small | **+0.15 B/delta (+9%)** | day 16 |
 | Recording size, realistic workload | smaller is better | −97.9% | day 8 |
 | Recorder overhead, realistic workload, **flow** | < 20x (ADR-0001 trigger) | **5.4x** | day 9 |
 | Recorder overhead, realistic workload, +capture | < 20x eventually | ~2100x* | day 9 |

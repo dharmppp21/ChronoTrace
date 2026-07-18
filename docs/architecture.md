@@ -59,16 +59,16 @@ it -- and the store is allowed to import the recorder's *event model* only, neve
 its runtime machinery (the monitoring callbacks, the frame registry), so the file
 format stays free to change independently of how observation works.
 
-## What exists today (Phase 1 complete)
+## What exists today
 
-Only `recorder` is implemented. `store` has its format **specified** but no codec
-yet; the rest are names in this diagram. The recorder produces an in-memory event
-stream (`MemorySink`); Phase 2 (days 11–18) makes it durable.
+`recorder` (Phase 1) and most of `store` (Phase 2) are implemented; the layers above
+are names in this diagram. The recorder produces an event stream, and the store now
+persists it durably, compresses it, and makes any past instant reachable.
 
 | Layer | Status | Built |
 |---|---|---|
 | recorder | **done** | days 4–10 |
-| store | writer + reader + zstd compression + value pool + keyframes ([`docs/format-spec.md`](format-spec.md)); block-size tuning next | days 11–18 |
+| store | writer + reader + zstd compression + value pool + keyframes + deltas ([`docs/format-spec.md`](format-spec.md)); block-size tuning next | days 11–18 |
 | index, reconstruct, query, server, frontend | planned | phases 2–5 |
 
 ## The storage format
@@ -83,6 +83,28 @@ The normative byte layout — implementable from scratch in any language — is
 `src/chronotrace/store/constants.py`. The store may import the recorder's *event
 model* only, never its runtime machinery, so the file format stays free to change
 independently of how observation works.
+
+### The codec: keyframe → deltas → any instant
+
+Reaching a past instant is a video codec. A **keyframe** (every N events) is the full
+live state at an instant; **deltas** are exactly what changed between them. Any `seq`
+is then the nearest keyframe plus a bounded replay — and because deltas store the *old*
+ref as well as the new, a step backward is one delta inverted, not a rewind.
+
+```
+  keyframes:   K0 ─────────── K1 ─────────── K2 ─────────── K3      (every N events)
+                │              │              │              │
+  deltas:       ·δδδ·δ·δδ····δ·│δ·δδ·····δδ·δ·│···δδ·δ····δ·δ│δ··    (bind / enter / exit)
+                              ▲
+  reach seq S:  nearest keyframe at or before S  (O(log K))
+                + apply the deltas from there to S   (at most N — the latency contract)
+  step back:    invert one delta                     (O(1), never a keyframe rewind)
+```
+
+`store/keyframe.py` owns the snapshot and the shared state a delta mutates;
+`store/delta.py` owns the delta and the two pure functions `apply` (forward) and
+`invert` (backward), whose referee is the property `invert(apply(s, d)) == s`.
+Reconstruction (day 21) is the layer that drives this codec to answer "state at S".
 
 ## Recorder internals
 
