@@ -155,18 +155,53 @@ def _decode_column(codec: int, data: bytes, limit: int) -> list[int]:
     raise ValueError(f"unknown column codec {codec}")
 
 
+def pack_columns(columns: list[list[int]]) -> bytes:
+    """Encode a list of equal-length integer columns, each with the cheapest codec.
+
+    The shared column primitive: EVENTS uses it for the ten `Event` fields, DELTAS
+    (day 16) for its own columns. Each column is `[u8 codec][u32 byte_length][bytes]`.
+    """
+    out = bytearray()
+    for column in columns:
+        codec, data = _encode_column(column)
+        out += _COL_HEADER.pack(codec, len(data))
+        out += data
+    return bytes(out)
+
+
+def unpack_columns(
+    payload: bytes, offset: int, ncols: int, count: int
+) -> tuple[list[list[int]], int]:
+    """Inverse of `pack_columns`: `ncols` columns of `count` values each, from `offset`.
+
+    **Parses untrusted input.** Each column is bounded to `count` values (the RLE
+    codecs refuse to expand past it), and a short slice raises `struct.error`. Returns
+    the columns and the offset just past them.
+
+    Raises:
+        ValueError: a column decodes to the wrong length, or uses an unknown codec.
+        struct.error: the payload is too short for a column header it declares.
+    """
+    columns: list[list[int]] = []
+    pos = offset
+    for _ in range(ncols):
+        codec, length = _COL_HEADER.unpack_from(payload, pos)
+        pos += _COL_HEADER.size
+        values = _decode_column(codec, payload[pos : pos + length], count)
+        if len(values) != count:
+            raise ValueError(f"column has {len(values)} values, expected {count}")
+        columns.append(values)
+        pos += length
+    return columns, pos
+
+
 def encode_events(events: list[Event]) -> bytes:
     """Encode a batch of events as an EVENTS block payload.
 
     Complexity: O(fields x events) -- three linear codec passes per column.
     """
-    out = bytearray(_COUNT.pack(len(events)))
-    for field in _FIELDS:
-        column = [_field_int(e, field) for e in events]
-        codec, data = _encode_column(column)
-        out += _COL_HEADER.pack(codec, len(data))
-        out += data
-    return bytes(out)
+    columns = [[_field_int(e, field) for e in events] for field in _FIELDS]
+    return _COUNT.pack(len(events)) + pack_columns(columns)
 
 
 def peek_count(buf: object, payload_offset: int) -> int:
@@ -203,16 +238,8 @@ def decode_events(payload: bytes) -> list[Event]:
     (count,) = _COUNT.unpack_from(payload, 0)
     if not 0 <= count <= MAX_EVENTS_PER_BLOCK:
         raise ValueError(f"block claims {count} events, over the {MAX_EVENTS_PER_BLOCK} cap")
-    pos = _COUNT.size
-    columns: dict[str, list[int]] = {}
-    for field in _FIELDS:
-        codec, length = _COL_HEADER.unpack_from(payload, pos)
-        pos += _COL_HEADER.size
-        values = _decode_column(codec, payload[pos : pos + length], count)
-        if len(values) != count:
-            raise ValueError(f"column {field!r} has {len(values)} values, expected {count}")
-        columns[field] = values
-        pos += length
+    column_list, _pos = unpack_columns(payload, _COUNT.size, len(_FIELDS), count)
+    columns = dict(zip(_FIELDS, column_list, strict=True))
     return [_row(columns, i) for i in range(count)]
 
 
