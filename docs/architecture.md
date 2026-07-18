@@ -68,7 +68,7 @@ persists it durably, compresses it, and makes any past instant reachable.
 | Layer | Status | Built |
 |---|---|---|
 | recorder | **done** | days 4–10 |
-| store | writer + reader + zstd compression + value pool + keyframes + deltas ([`docs/format-spec.md`](format-spec.md)); block-size tuning next | days 11–18 |
+| store | **done (M2, day 18)** — writer + reader + zstd + value pool + keyframes + deltas + crash recovery, defaults tuned by grid ([`docs/format-spec.md`](format-spec.md), [ADR-0005](adr/0005-storage-defaults.md)) | days 11–18 |
 | index, reconstruct, query, server, frontend | planned | phases 2–5 |
 
 ## The storage format
