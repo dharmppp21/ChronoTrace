@@ -62,7 +62,7 @@ from chronotrace.recorder.capture import CapturedValue
 from chronotrace.recorder.events import Event
 from chronotrace.recorder.values import ValueRef
 from chronotrace.store.columnar import COUNT_SIZE, encode_events
-from chronotrace.store.compression import compress
+from chronotrace.store.compression import DEFAULT_LEVEL, compress
 from chronotrace.store.constants import (
     EOCD,
     EOCD_MAGIC,
@@ -81,10 +81,15 @@ from chronotrace.store.framing import encode_block
 from chronotrace.store.keyframe import DEFAULT_KEYFRAME_INTERVAL, KF_SEQ, LiveState
 from chronotrace.store.valuepool import ValuePoolWriter
 
-DEFAULT_BLOCK_EVENTS = 65536
-"""Events per EVENTS block. Bigger compresses better and shrinks the index; smaller
-makes a point read decode less. 65536 is a starting point, not a tuned value --
-day 18's file-size experiment validates or moves it (ADR-0004)."""
+DEFAULT_BLOCK_EVENTS = 4096
+"""Events per EVENTS (and DELTAS) block. **Tuned on day 18's grid ([ADR-0005]).**
+
+Random access decodes a whole block, so its latency grows ~linearly with block size
+(~2.1 us/event): 4096 gives ~9 ms cold access, where the old 65536 gave ~133 ms --
+unusable for scrubbing, which is the product. 4096 costs only ~9% more file than the
+65536 compression optimum (5.0 vs 4.6 B/event). It is the knee of the
+latency-vs-size curve: smaller buys diminishing speed for a steepening size cost.
+[ADR-0005]: ../../../docs/adr/0005-storage-defaults.md"""
 
 _EMPTY_META = b"\x80"  # msgpack empty map; config META lands day 14 (see module docstring)
 
@@ -107,6 +112,7 @@ class ChronoWriter:
         "_deltas",
         "_index",
         "_interval",
+        "_level",
         "_live",
         "_offset",
         "_pool",
@@ -119,10 +125,12 @@ class ChronoWriter:
         *,
         block_events: int = DEFAULT_BLOCK_EVENTS,
         keyframe_interval: int = DEFAULT_KEYFRAME_INTERVAL,
+        compression_level: int = DEFAULT_LEVEL,
     ) -> None:
         self._stream = stream
         self._block_events = block_events
         self._interval = keyframe_interval
+        self._level = compression_level
         self._buffer: list[Event] = []
         self._deltas: list[Delta] = []
         self._live = LiveState()
@@ -173,7 +181,9 @@ class ChronoWriter:
             # ponytail: one VALUES block. Split into size-bounded blocks with a global
             # ref->block directory only when a pool outgrows a block (day 15+ needs it).
             self._write_block(
-                BlockType.VALUES, compress(self._pool.encode()), BlockFlag.COMPRESSED_ZSTD
+                BlockType.VALUES,
+                compress(self._pool.encode(), level=self._level),
+                BlockFlag.COMPRESSED_ZSTD,
             )
         index_payload = b"".join(INDEX_ENTRY.pack(t, o, ln) for t, o, ln in self._index)
         index_offset = self._offset
@@ -193,7 +203,7 @@ class ChronoWriter:
     def _emit_keyframe(self, seq: int) -> None:
         # The u64 seq stays uncompressed at the front so the reader can peek which
         # instant a keyframe snapshots without decompressing it (the seq index).
-        payload = KF_SEQ.pack(seq) + compress(self._live.encode())
+        payload = KF_SEQ.pack(seq) + compress(self._live.encode(), level=self._level)
         self._write_block(BlockType.KEYFRAMES, payload, BlockFlag.COMPRESSED_ZSTD)
 
     def _flush(self) -> None:
@@ -203,7 +213,7 @@ class ChronoWriter:
         # seq without decompressing every block (peek_count); compress only the columns.
         # The CRC (in encode_block) then covers the stored bytes, as the spec requires.
         blob = encode_events(self._buffer)
-        payload = blob[:COUNT_SIZE] + compress(blob[COUNT_SIZE:])
+        payload = blob[:COUNT_SIZE] + compress(blob[COUNT_SIZE:], level=self._level)
         self._write_block(BlockType.EVENTS, payload, BlockFlag.COMPRESSED_ZSTD)
         self._buffer.clear()
         self._flush_deltas()
@@ -214,7 +224,7 @@ class ChronoWriter:
         # The (first, last) seq span stays uncompressed so the reader answers
         # deltas_between() by peeking a block's range without decompressing it.
         span = DELTA_RANGE.pack(self._deltas[0].seq, self._deltas[-1].seq)
-        payload = span + compress(encode_deltas(self._deltas))
+        payload = span + compress(encode_deltas(self._deltas), level=self._level)
         self._write_block(BlockType.DELTAS, payload, BlockFlag.COMPRESSED_ZSTD)
         self._deltas.clear()
 

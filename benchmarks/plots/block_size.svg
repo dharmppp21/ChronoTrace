@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 400" font-family="sans-serif">
+<rect width="640" height="400" fill="white"/>
+<text x="320.0" y="24" text-anchor="middle" font-size="16" font-weight="bold">Block size vs size and random-access latency</text>
+<text x="320.0" y="392" text-anchor="middle" font-size="12">block (events, log)</text>
+<text x="16" y="200.0" text-anchor="middle" font-size="12" transform="rotate(-90 16 200.0)">B/event (blue) · us (red)</text>
+<line x1="64" y1="336" x2="620" y2="336" stroke="black"/>
+<line x1="64" y1="30" x2="64" y2="336" stroke="black"/>
+<polyline points="64.0,57.8 249.3,95.8 434.7,111.4 620.0,116.3" fill="none" stroke="steelblue" stroke-width="2"/>
+<circle cx="64.0" cy="57.8" r="4" fill="steelblue"/><circle cx="249.3" cy="95.8" r="4" fill="steelblue"/><circle cx="434.7" cy="111.4" r="4" fill="steelblue"/><circle cx="620.0" cy="116.3" r="4" fill="steelblue"/>
+<text x="64.0" y="49.8" text-anchor="middle" font-size="10">6</text><text x="249.3" y="87.8" text-anchor="middle" font-size="10">5</text><text x="434.7" y="103.4" text-anchor="middle" font-size="10">5</text><text x="620.0" y="108.3" text-anchor="middle" font-size="10">5</text>
+<text x="64.0" y="352.0" text-anchor="middle" font-size="10">1024</text><text x="249.3" y="352.0" text-anchor="middle" font-size="10">4096</text><text x="434.7" y="352.0" text-anchor="middle" font-size="10">16384</text><text x="620.0" y="352.0" text-anchor="middle" font-size="10">65536</text>
+<polyline points="64.0,331.4 249.3,317.9 434.7,265.5 620.0,57.8" fill="none" stroke="firebrick" stroke-width="2"/>
+<circle cx="64.0" cy="331.4" r="4" fill="firebrick"/><circle cx="249.3" cy="317.9" r="4" fill="firebrick"/><circle cx="434.7" cy="265.5" r="4" fill="firebrick"/><circle cx="620.0" cy="57.8" r="4" fill="firebrick"/>
+<text x="64.0" y="323.4" text-anchor="middle" font-size="10">2204</text><text x="249.3" y="309.9" text-anchor="middle" font-size="10">8664</text><text x="434.7" y="257.5" text-anchor="middle" font-size="10">33811</text><text x="620.0" y="49.8" text-anchor="middle" font-size="10">133444</text>
+<text x="64.0" y="352.0" text-anchor="middle" font-size="10">1024</text><text x="249.3" y="352.0" text-anchor="middle" font-size="10">4096</text><text x="434.7" y="352.0" text-anchor="middle" font-size="10">16384</text><text x="620.0" y="352.0" text-anchor="middle" font-size="10">65536</text>
+</svg>
