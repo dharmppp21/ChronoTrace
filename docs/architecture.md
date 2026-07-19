@@ -69,7 +69,8 @@ persists it durably, compresses it, and makes any past instant reachable.
 |---|---|---|
 | recorder | **done** | days 4–10 |
 | store | **done (M2, day 18)** — writer + reader + zstd + value pool + keyframes + deltas + crash recovery, defaults tuned by grid ([`docs/format-spec.md`](format-spec.md), [ADR-0005](adr/0005-storage-defaults.md)) | days 11–18 |
-| index, reconstruct, query, server, frontend | planned | phases 2–5 |
+| reconstruct | **designed** ([ADR-0006](adr/0006-reconstruction.md)); `ProgramState`/`Reconstructor` types shipped, algorithm day 20 | days 19–22 |
+| index, query, server, frontend | planned | phases 3–5 |
 
 ## The storage format
 

@@ -46,6 +46,8 @@ the project: read in order, it explains how each decision forced the next.
 | [0002](0002-frame-registry.md) | A live-frame registry, not a call stack | Accepted |
 | [0003](0003-dedup-correctness.md) | Deduplicate values by content, never by identity | Accepted |
 | [0004](0004-chrono-file-format.md) | A purpose-built columnar `.chrono` format | Accepted |
+| [0005](0005-storage-defaults.md) | Storage defaults chosen by measurement (block size, interval, level) | Accepted |
+| [0006](0006-reconstruction.md) | Reconstruction: keyframe + bounded delta replay, O(1) backward via inversion | Accepted |
 
 ## Baseline decisions not recorded here
 
