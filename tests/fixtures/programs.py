@@ -51,3 +51,15 @@ def holds_the_zoo(zoo: dict[str, Any]) -> int:
     values = list(zoo.values())
     count = len(values)
     return count
+
+
+def countdown(n: int) -> int:
+    """Bounded recursion: `n` is bound in one frame per call, all live at once.
+
+    The case that separates "the last write to `n`" from "the last write to `n` *in this
+    invocation*" -- keyed on the name alone they are the same query and the answer is
+    wrong. `tests/index/test_var_writes.py` pins it.
+    """
+    if n <= 0:
+        return 0
+    return n + countdown(n - 1)
