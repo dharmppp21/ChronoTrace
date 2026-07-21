@@ -38,3 +38,44 @@ the recording.
 
 Design: [ADR-0008](../../../docs/adr/0008-index-schema.md). Built day 26.
 """
+
+from __future__ import annotations
+
+import sqlite3
+from collections.abc import Callable
+from pathlib import Path
+
+from chronotrace.index.indexer import Cancelled, Indexer, Progress, Result, build
+from chronotrace.index.var_writes import VarWriteIndexer, last_write_before, writes_to
+from chronotrace.store import ChronoReader, Strings
+
+__all__ = [
+    "Cancelled",
+    "Indexer",
+    "Progress",
+    "Result",
+    "VarWriteIndexer",
+    "build_index",
+    "last_write_before",
+    "writes_to",
+]
+
+
+def build_index(
+    recording: Path,
+    reader: ChronoReader,
+    *,
+    on_progress: Callable[[Progress], None] | None = None,
+    should_cancel: Callable[[], bool] | None = None,
+) -> Result:
+    """Build every index this layer knows about, in one pass over the recording.
+
+    The registry of indexers lives here rather than in the driver, so `indexer.py` stays
+    ignorant of what any particular index stores. Day 27 adds three more to this list and
+    changes nothing else.
+    """
+
+    def make(connection: sqlite3.Connection, _strings: Strings) -> list[Indexer]:
+        return [VarWriteIndexer(connection)]
+
+    return build(recording, reader, make, on_progress=on_progress, should_cancel=should_cancel)

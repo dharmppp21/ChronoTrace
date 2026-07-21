@@ -20,11 +20,9 @@ row into the key it is looked up by measured at **30.3 -> 14.5 B/event, 6.3x -> 
 recording**, with identical build time and identical query latency. Halving the storage
 for free is worth the two words.
 
-Durability is deliberately off
-------------------------------
-`journal_mode=OFF`, `synchronous=OFF`. A torn index after a crash is not a data loss
-event, it is a rebuild -- and the recording it derives from is untouched. Paying for
-durability on a cache is paying for the wrong thing.
+Durability is deliberately off -- see `db.connect`, which owns the pragmas. A torn index
+after a crash is not a data loss event, it is a rebuild, and the recording it derives from
+is untouched.
 """
 
 from __future__ import annotations
@@ -45,17 +43,24 @@ DDL = """
 -- Staleness detection and provenance. See `stamp` / `staleness`.
 CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID;
 
--- The recording's intern tables, ids preserved. Copied rather than re-interned so a
--- `name_id` means the same thing in the index and in the events (ADR-0008 section 7).
+-- Variable names, keyed by the recording's own `name_id`. Copied rather than
+-- re-interned so an id means the same thing in the index and in the events, which is
+-- what lets `var_writes.name_id` be looked up directly (ADR-0008 section 7).
 CREATE TABLE strings(id INTEGER PRIMARY KEY, text TEXT NOT NULL);
 --   query: "every write to `total`" -- the user types text, the index speaks ids.
 CREATE INDEX ix_strings_text ON strings(text);
 
--- One row per interned code object. Never anything requiring the original .pyc.
+-- One row per interned code object, with filename and qualname stored as text rather
+-- than as string ids. `strings.id` *is* `name_id`, a different id space from `code_id`,
+-- so a shared pool would need a second mapping table to keep Q8 a direct lookup -- and
+-- interning buys nothing here anyway: this table has hundreds of rows, not millions.
+-- That is where the size argument actually applies (ADR-0008 day-26 amendment).
+-- Never anything requiring the original .pyc: a recording must be readable on a machine
+-- that has never seen the program.
 CREATE TABLE codes(
     code_id INTEGER PRIMARY KEY,
-    file_id INTEGER NOT NULL,
-    qualname_id INTEGER NOT NULL,
+    filename TEXT NOT NULL,
+    qualname TEXT NOT NULL,
     first_lineno INTEGER NOT NULL
 );
 
@@ -117,13 +122,14 @@ CREATE TABLE density(
 ) WITHOUT ROWID;
 """
 
-PRAGMAS = "PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF;"
-"""Durability off: see the module docstring. Applied per connection, not stored."""
-
 
 def create(connection: sqlite3.Connection) -> None:
-    """Apply the DDL to a fresh database. Idempotent only on an empty one."""
-    connection.executescript(PRAGMAS + DDL)
+    """Apply the DDL to a fresh database. Idempotent only on an empty one.
+
+    Pragmas are `db.connect`'s job, not this one's -- they are a property of the
+    connection, not the schema, and setting them in both places is one list to drift.
+    """
+    connection.executescript(DDL)
 
 
 def fingerprint(recording: Path) -> str:
