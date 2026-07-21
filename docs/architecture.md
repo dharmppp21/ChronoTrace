@@ -107,6 +107,39 @@ ref as well as the new, a step backward is one delta inverted, not a rewind.
 `invert` (backward), whose referee is the property `invert(apply(s, d)) == s`.
 Reconstruction (day 21) is the layer that drives this codec to answer "state at S".
 
+## How correctness is established
+
+Three layers of proof, each catching what the one below cannot. They are part of the
+design, not an afterthought bolted on at test time.
+
+| proof | what it compares | what it cannot catch |
+|---|---|---|
+| unit tests | each piece against hand-written expectations | pieces that are individually right and wrong together |
+| the **oracle** (day 20, `reconstruct/oracle.py`) | the fast reconstruction against a slow, obviously-correct one that ships forever | a *recorder* that misunderstood the program — both paths are then wrong together |
+| the **referee** (day 22, `tests/equivalence/`) | reconstructed state against the state the program actually had, observed live | a bug inside `capture` itself, which both observers share by necessity |
+
+The referee is the only one that spans all five subsystems at once — recorder, store,
+keyframes, deltas, reconstructor. Its ground truth comes from a **second
+`sys.monitoring` tool** under its own tool id, reading `frame.f_locals` directly and
+importing none of the recorder's machinery. That independence is the whole point: a truth
+source built from `FrameRegistry` agrees with `FrameRegistry`'s bugs, and the test would
+assert `X == X` forever while shipping a debugger that lies.
+
+Two properties make it trustworthy rather than decorative:
+
+- **It is proven to fail.** Four bugs are deliberately injected — a dropped delta, a
+  lying keyframe, content-blind dedup (the day-8 mutation bug), a drifting reconstruction
+  cache — and it must go red for each.
+- **Its comparator is not lenient.** Exactly one difference is forgiven (object-identity
+  ids, which two independent identity maps cannot agree on by construction). Truncation
+  and redaction are *not* allowances: the observer applies the same policy, so a truncated
+  value must match a truncated value exactly.
+
+It caught a real, untracked defect on its first run — `del x` leaves a binding alive in
+reconstruction forever ([#7](https://github.com/dharmppp21/ChronoTrace/issues/7)).
+A red referee blocks merge; see [CONTRIBUTING](../CONTRIBUTING.md#the-referee) and
+[`tests/equivalence/README.md`](../tests/equivalence/README.md).
+
 ## Recorder internals
 
 Within the recorder, the pieces and their jobs (all under

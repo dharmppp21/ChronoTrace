@@ -27,6 +27,29 @@ mypy                    # types, --strict
 pytest                  # tests
 ```
 
+## The referee
+
+`tests/equivalence/` is the project's referee: it asserts that the state ChronoTrace
+reconstructs is the state the program **actually had**, observed live by a mechanism that
+shares no code with the recorder. It is a required check on all nine CI cells.
+
+**A red harness blocks merge. No exceptions.**
+
+Not "investigate before merging" — blocks. Every other test in this repo checks
+ChronoTrace against ChronoTrace, so they can all pass while the debugger lies about a
+program. This one cannot. If it goes red, one of these is true and each is a stop:
+
+1. Reconstruction is wrong. Fix it.
+2. The program diverges for a reason the system genuinely never claimed. Then it belongs
+   in `KNOWN_DIVERGENCES` with an open issue and an exact expectation that fails once the
+   divergence stops — **never** as a new tolerance in `compare.py`. A lenient comparator
+   is a test that always passes and protects nothing.
+3. The harness itself is broken (an `AlignmentError` says so explicitly). Fix the harness.
+
+Weakening the comparator to make it green is the one change that will always be rejected
+in review. Read [`tests/equivalence/README.md`](tests/equivalence/README.md) before
+touching it.
+
 ## Standards
 
 These are enforced by review, not just by tooling.

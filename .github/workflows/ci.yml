@@ -54,5 +54,13 @@ jobs:
       - name: Types
         run: mypy
 
+      # Run before the full suite, and separately from it. Separately, because this is
+      # the only test that compares ChronoTrace against reality rather than against
+      # itself -- when it breaks, the matrix should say so by name instead of burying it
+      # among a few hundred green dots. First, because it is the fastest way to learn the
+      # debugger has started lying. A red referee blocks merge; see CONTRIBUTING.md.
+      - name: Replay equivalence (the referee)
+        run: pytest tests/equivalence -q
+
       - name: Tests
         run: pytest
