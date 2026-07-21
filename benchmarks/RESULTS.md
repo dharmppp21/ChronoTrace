@@ -669,6 +669,62 @@ alone would have shipped:
 
 ---
 
+## Day 21 — backward stepping (`bench_stepping.py`)
+
+`json_pipeline`, 280,996 events, 281 keyframes, tuned defaults (ADR-0005). A step is a
+`seq` search over events plus **one** reconstruction at the destination.
+
+### A backward drag is interactive
+
+| operation | p50 | p95 | p99 |
+|---|---:|---:|---:|
+| **backward drag** (`step_back` + reconstruct, 10,000 consecutive steps) | **715 µs** | 1,230 µs | 1,521 µs |
+
+10,000 backward steps take **7.28 s** in total, and p99 sits **11× inside** a 60 fps
+frame budget (16,000 µs). Backward stepping is not the bottleneck it was assumed to be.
+
+### How far each search actually travels
+
+| operation | p50 distance | max distance |
+|---|---:|---:|
+| `step_back` | 1 event | 9 events |
+| `step_over_back` | 1 event | **280,993 events** |
+
+That maximum is one `next` over a call made from a module-level frame — and it is the
+number that settles the design question below.
+
+### The search, isolated from reconstruction
+
+| operation | p50 | p99 |
+|---|---:|---:|
+| `step_back` | 1.0 µs | 8.3 µs |
+| `step_over_back` | 1.8 µs | **631,000 µs** |
+| `step_out_back` | 84.6 µs | **620,000 µs** |
+
+**A known ceiling, stated plainly:** the scan is linear, so the rare long `step_over_back`
+costs 0.63 s. The median is 1.8 µs — the distribution is bimodal, not uniformly slow.
+Making the scan ~5× faster (iterating decoded blocks instead of `reader[seq]`) would still
+leave 126 ms, four times over budget, so **the constant factor is the wrong lever**: only
+day 30's line index, which answers "previous LINE in frame F" as a lookup, actually fixes
+it. Tracked as issue #5; deliberately not half-fixed.
+
+### The measurement that overturned ADR-0006 §3
+
+ADR-0006 decided backward stepping should **invert deltas** for an O(1) step, assuming the
+delta replay dominates. Splitting a backward step's cost says otherwise:
+
+| phase | cost | invertible? |
+|---|---:|---|
+| delta replay | 231 µs | yes — this is all inversion could remove |
+| event overlay | 487 µs | **no** — events carry no *previous* `lineno`, so each frame's current line must be re-derived from the keyframe whichever way the bindings arrived |
+
+**Inversion's ceiling is 32%** of an operation already 11× inside budget. Buying ~230 µs
+nobody can perceive, at the price of a second incremental state machine — precisely the
+"silently drifting cached state" ADR-0006 §4 names as unsurvivable — is a bad trade.
+Rejected on the numbers; see the ADR-0006 day-21 amendment.
+
+---
+
 ## Standing budgets
 
 | thing | budget | current | measured |
@@ -679,6 +735,8 @@ alone would have shipped:
 | Keyframe file overhead (default interval) | small | **+5.3%** | day 15 |
 | On-disk bytes per delta | smaller is better | **1.90 B/delta** | day 16 |
 | Cost of invertibility (storing `old_ref`) | small | **+0.15 B/delta (+9%)** | day 16 |
+| Backward step latency (p99) | < 16,000 µs (one frame) | **1,521 µs** | day 21 |
+| `step_over_back` worst case | < 16,000 µs (one frame) | **630,000 µs** (issue #5) | day 21 |
 | Recording size, realistic workload | smaller is better | −97.9% | day 8 |
 | Recorder overhead, realistic workload, **flow** | < 20x (ADR-0001 trigger) | **5.4x** | day 9 |
 | Recorder overhead, realistic workload, +capture | < 20x eventually | ~2100x* | day 9 |
