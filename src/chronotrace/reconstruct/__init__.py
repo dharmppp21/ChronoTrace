@@ -28,4 +28,31 @@ The instant, shared with keyframes
 `ProgramState.seq` is the state **after** event `seq` has executed -- the exact word
 `keyframe.py` uses. If that word ever differs by one, an off-by-one haunts the scrubber
 for a week; it is asserted identical in the tests.
+
+Two implementations, on purpose
+-------------------------------
+`KeyframeReconstructor` is the fast path (the product). `reconstruct_slow` is the
+obviously-correct oracle it is tested against, and it **ships** -- see `oracle.py` for
+why a permanently slow function is an asset, not debt.
 """
+
+from chronotrace.reconstruct.oracle import reconstruct_slow
+from chronotrace.reconstruct.reconstructor import KeyframeReconstructor
+from chronotrace.reconstruct.resolve import MissingValue, ValueResolver
+from chronotrace.reconstruct.types import (
+    ExceptionState,
+    FrameState,
+    ProgramState,
+    Reconstructor,
+)
+
+__all__ = [
+    "ExceptionState",
+    "FrameState",
+    "KeyframeReconstructor",
+    "MissingValue",
+    "ProgramState",
+    "Reconstructor",
+    "ValueResolver",
+    "reconstruct_slow",
+]
