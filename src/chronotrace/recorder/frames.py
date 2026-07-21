@@ -42,21 +42,33 @@ So: entries = START + RESUME, exits = YIELD + RETURN + UNWIND. They balance.
 Why `id(frame)` is safe here specifically
 -----------------------------------------
 Day 3 proved `id()` is unique only among *live* objects and CPython reuses
-addresses -- which is why `frame_id` is a monotonic counter and never an id. But
-the registry's key is different: it maps an id only while that frame is alive,
-and drops it the instant the frame exits. Reuse cannot bite, because a reused
-address means the previous owner is gone and its entry with it.
+addresses -- which is why `frame_id` is a monotonic counter and never an id. The
+registry's key is different: it maps an address only while that frame is alive,
+and drops it the instant the frame exits.
+
+That is *almost* enough, and the gap is worth stating because it bit. It assumes
+every frame that enters also exits, so a reused address always finds an empty
+slot. When an entry leaks -- CPython < 3.13 emits no `PY_UNWIND` for a generator
+finalised by the collector, see issue #4 -- the assumption fails, the address is
+reused while the stale entry is still there, and `enter` hands a brand-new frame
+the dead one's id. Two unrelated frames fuse into one, which is precisely what
+`frame_id` exists to prevent.
+
+`enter(..., resuming=)` closes it: a `PY_START` never recovers an id, because a
+frame that is starting did not exist a moment ago. Only `PY_RESUME` recovers.
+Found by the day-22 equivalence harness on CPython 3.12.
 
 Frames are **not** weakref-able (checked), so a `WeakKeyDictionary` was not an
 option. We store `id(frame)` -- an int -- never the frame itself, so the registry
 cannot pin the user's locals alive.
 
-Does the registry leak on an abandoned generator?
--------------------------------------------------
-No, and this was measured rather than hoped. A generator dropped without being
-exhausted still exits: CPython throws `GeneratorExit` into it during collection,
-producing `RAISE -> EXCEPTION_HANDLED -> RERAISE -> PY_UNWIND`. The `UNWIND`
-removes it. Every frame that enters, exits.
+Abandoned generators
+--------------------
+On CPython >= 3.13 a generator dropped without being exhausted still exits:
+`GeneratorExit` is thrown into it during collection, producing
+`RAISE -> EXCEPTION_HANDLED -> RERAISE -> PY_UNWIND`, and the `UNWIND` removes it.
+On 3.12 that `PY_UNWIND` is not emitted, so the entry leaks -- an interpreter
+limitation tracked as issue #4, and the reason the paragraph above exists.
 """
 
 from __future__ import annotations
@@ -119,7 +131,7 @@ class FrameRegistry:
         """How many frames are alive. Zero at the end of a balanced program."""
         return len(self._live)
 
-    def enter(self, frame: FrameType) -> int:
+    def enter(self, frame: FrameType, *, resuming: bool = False) -> int:
         """A frame started or resumed. Returns its frame_id.
 
         The same `frame_id` is returned across a generator's whole life: `PY_START`
@@ -127,8 +139,16 @@ class FrameRegistry:
         resume would split one generator into N unrelated frames, and the day 27
         call tree would show a program that never ran.
 
+        `resuming` is what makes that recovery safe. A `PY_START` is by definition a
+        frame that did not exist a moment ago, so finding its address already mapped
+        proves the previous owner died **without an exit event** and CPython reused the
+        address. Recovering that id would fuse two unrelated frames into one -- the exact
+        failure `frame_id` exists to prevent, arriving through the back door. So a start
+        always takes a fresh id; only a resume recovers.
+
         Args:
             frame: the frame entering. Only its `id()` is kept, never a reference.
+            resuming: True for `PY_RESUME`, False for `PY_START`.
 
         Returns:
             The frame's stable id.
@@ -137,9 +157,9 @@ class FrameRegistry:
         """
         key = id(frame)
         frame_id = self._live.get(key)
-        if frame_id is None:
+        if frame_id is None or not resuming:
             frame_id = next(self._counter)
-            self._live[key] = frame_id
+            self._live[key] = frame_id  # replaces a stale entry, if the address was reused
         self._stack.executing.append(frame_id)
         return frame_id
 

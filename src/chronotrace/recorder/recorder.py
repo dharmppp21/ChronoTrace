@@ -348,7 +348,7 @@ class Recorder:
         try:
             if not self._scope.allows(code.co_filename):
                 return sys.monitoring.DISABLE
-            frame_id = self._frames.enter(sys._getframe(1))
+            frame_id = self._frames.enter(sys._getframe(1), resuming=True)
             self._emit(EventKind.RESUME, code, frame_id, code.co_firstlineno)
         except Exception:
             self._dropped += 1

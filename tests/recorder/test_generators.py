@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 
 from chronotrace.recorder import EventKind, MemorySink, Recorder
+from chronotrace.recorder.frames import FrameRegistry
 
 from .conftest import EXAMPLES, OnlyThisFile, record_example
 from .invariants import (
@@ -111,6 +112,25 @@ def test_async_gather_interleaves_and_stays_coherent() -> None:
 
     resumed = [e.frame_id for e in events if e.kind is EventKind.RESUME]
     assert len(set(resumed)) >= 2, "expected several coroutine frames to resume"
+
+
+def test_a_start_never_inherits_a_live_frames_id() -> None:
+    """Address reuse must not fuse two frames -- the bug `frame_id` exists to prevent.
+
+    A `PY_START` for an address the registry still holds proves the previous owner died
+    without an exit event and CPython reused its address (which happens for real on 3.12,
+    where an abandoned generator emits no `PY_UNWIND` -- issue #4). Recovering that id
+    would give a brand-new frame a dead frame's identity, and the delta stream would then
+    carry two `FRAME_ENTER`s for one live frame.
+
+    Found by the day-22 equivalence harness. Driven directly rather than through a
+    recording because provoking real address reuse is a coin flip.
+    """
+    registry = FrameRegistry()
+    frame = sys._getframe()
+    first = registry.enter(frame)
+    assert registry.enter(frame, resuming=True) == first, "a resume must recover its id"
+    assert registry.enter(frame) != first, "a start must never inherit a live frame's id"
 
 
 def test_registry_is_empty_after_a_recording() -> None:
