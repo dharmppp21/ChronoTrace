@@ -260,12 +260,12 @@ not yet solved because it has no consumer: the exceptions indexer lands on day 2
 `exc_types` table lands with it. Noted rather than built, so the table does not ship ahead
 of anything that writes to it.
 
-**3. The size estimate was generous.** §6 predicted 14.5 B/event and 3.0× the recording.
-Measured on a real recording with `var_writes` alone: **5.4 B/event, 1.1×**. The estimate
-assumed both large tables; today's index produces a row per *variable write*, not per
-event — 85k rows for 281k events. Day 27's `line_hits` is the bigger table and will push
-the ratio toward the original figure. The 10 GB warning in §6 stands, with more headroom
-than expected.
+**3. The size estimate looked generous, and was not.** §6 predicted 14.5 B/event and 3.0×
+the recording. Measured with `var_writes` alone: 5.4 B/event, 1.1×. That reading was the
+*incomplete measurement*, not a wrong estimate — day 27 added `line_hits`, the largest
+table, and the real figure is **17.1 B/event, 3.5×**, slightly worse than §6 predicted.
+The 10 GB case is therefore ~34 GB rather than ~29 GB, and the threshold knob is still
+needed.
 
 **And one thing measurement overturned:** the standard "create indexes after bulk load"
 advice does not hold for this schema — 4.49 s after vs 4.31 s before, with the clustered
@@ -273,6 +273,85 @@ advice does not hold for this schema — 4.49 s after vs 4.31 s before, with the
 order across a few hundred names, so every page is hot and maintaining the tree during
 insert is nearly free. `var_writes` therefore ships **no secondary index at all**: the
 primary key is the access path. Numbers in `benchmarks/RESULTS.md`.
+
+## Amendment (day 27) — intervals encode *time*, not the tree
+
+**Schema version 2.** Four more indexes shipped today, and one tempting optimisation was
+tested and rejected.
+
+### New tables and indexes, each with its query
+
+| index | serves | complexity |
+|---|---|---|
+| `files` PK `(file_id)` + `ix_files_path` | a user names a file, the index stores ids | O(log n) |
+| `exc_types` PK `(id)` | `type_id` → `"ValueError"`, the gap §7 left open | O(log n) |
+| `ix_frames_entry` `(entry_seq, exit_seq)` | **"which frames were live at `seq`?"** — every scrub | O(log n + live) |
+
+`files` exists because `line_hits` is the largest table in the index and carries a
+`file_id` per row rather than a path. That is where interning pays; `codes` still stores
+its qualname as text, for the reason the day-26 amendment gives.
+
+### The insight the day was supposed to be about, and why it is wrong here
+
+`entry_seq`/`exit_seq` look exactly like a nested-set encoding, which would make
+"descendants of F" one indexed range scan instead of a recursive walk — *a descendant is
+any frame whose interval nests inside F's*. Reusing data you already have instead of
+adding a second mechanism is normally the right instinct.
+
+**It does not hold, and generators are why** — the same feature that killed the stack
+model in ADR-0002. Measured on `examples/generators.py::interleaved_generators`:
+
+```
+frame 1  [ 0, 19)  parent=None     <- the caller
+frame 2  [ 3, 25)  parent=1        <- a generator: OUTLIVES its parent
+frame 3  [ 7, 22)  parent=1        <- and OVERLAPS its sibling
+```
+
+Both invariants a nested-set encoding needs are violated. A child's interval is not
+contained in its parent's, because the generators are finalised after the caller returned;
+and siblings overlap, because two generators of the same function are alive at once. The
+error runs the other way too: while a generator is suspended, every unrelated frame that
+runs has an interval nesting *inside* it, so containment reports strangers as descendants.
+
+So the two questions are split by what they actually are:
+
+- **liveness is a time question** → the interval predicate,
+  `entry_seq <= S AND (exit_seq > S OR exit_seq IS NULL)`, one indexed range scan. This
+  *is* correct, and it handles a never-exiting frame for free.
+- **ancestry is a structure question** → the `parent_frame_id` walk, as a recursive CTE.
+  O(subtree), bounded by the subtree rather than the recording.
+
+`test_descendants_match_the_recursive_cte_oracle` shows the two agree on a plain call
+tree — which is exactly why the trap is easy to fall into — and
+`test_intervals_stop_encoding_ancestry_once_frames_suspend` pins the counter-example so
+the optimisation is never "rediscovered".
+
+### The interval convention, and *live* vs *executing*
+
+Intervals are **half-open**, `[entry_seq, exit_seq)`. At `exit_seq` the frame is already
+gone from reconstructed state, so a closed interval would report a dead frame as live for
+one `seq` — a stale row in the call-stack panel on every return.
+
+Two distinct notions, both of which the UI needs:
+
+- **live** — the frame exists at `seq`, *including a suspended generator* holding real
+  locals while sitting on no stack. This index answers it.
+- **executing** — the one frame that ran the event at `seq`. That is
+  `ProgramState.current_frame_id`; reconstruction already answers it.
+
+At a `YIELD` instant they coincide (the suspending frame ran the event that suspended it),
+which is worth knowing before writing an assertion about them.
+
+### The heatmap is not materialised — today
+
+"How many times did each line run?" is a `GROUP BY` over `line_hits`. Measured at **12.8
+ms** over 178,914 rows, which is acceptable for a background drawn once per file opened
+and *not* acceptable for one recomputed while scrolling — it is over a frame budget, and
+at 10M events it extrapolates to about half a second.
+
+Not built today: nothing consumes it before day 35, and a second table is a second
+representation of one fact with freedom to disagree. Tracked as issue #12 with the real
+number and the breaking point, so the UI inherits a measurement instead of an assumption.
 
 ## Consequences
 

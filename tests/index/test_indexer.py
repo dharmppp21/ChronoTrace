@@ -134,8 +134,11 @@ def test_the_recordings_own_intern_tables_land_in_the_index(tmp_path: Path) -> N
     db = sqlite3.connect(result.path)
     assert db.execute("SELECT count(*) FROM strings").fetchone()[0] > 0
     assert db.execute("SELECT id FROM strings WHERE text='data'").fetchone() is not None
-    filename = db.execute("SELECT filename FROM codes LIMIT 1").fetchone()[0]
-    assert filename.endswith(".py"), "codes must resolve without the original .pyc"
+    path = db.execute(
+        "SELECT f.path FROM codes c JOIN files f ON c.file_id = f.file_id LIMIT 1"
+    ).fetchone()[0]
+    assert path.endswith(".py"), "codes must resolve to a file without the original .pyc"
+    assert db.execute("SELECT count(*) FROM exc_types").fetchone()[0] >= 0
 
 
 def test_the_batcher_never_loses_a_partial_batch() -> None:

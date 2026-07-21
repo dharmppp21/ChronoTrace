@@ -11,6 +11,9 @@ Two questions:
    and standard advice is a hypothesis. Three layouts are measured on identical data:
    the clustered `WITHOUT ROWID` table the schema ships, a rowid table with the index
    built afterwards, and a rowid table with it built first.
+3. **Does the single-pass driver actually pay?** Five indexers over one read, against the
+   same five over five reads. The abstraction was justified by that claim on day 26; day
+   27 has five real implementations, so the claim can be checked instead of asserted.
 """
 
 from __future__ import annotations
@@ -99,6 +102,44 @@ def _layout(label: str, ddl: str, index_sql: str, rows: list[tuple[int, int, int
     )
 
 
+def _passes(recording: Path) -> None:
+    """One pass with five indexers, against five passes with one each."""
+    from chronotrace.index import (
+        CallTreeIndexer,
+        DensityIndexer,
+        ExceptionIndexer,
+        LineHitIndexer,
+        VarWriteIndexer,
+        build_index,
+    )
+    from chronotrace.index.indexer import build
+
+    with ChronoReader.open(recording) as reader:
+        start = time.perf_counter()
+        build_index(recording, reader)
+        single = time.perf_counter() - start
+
+    factories = [
+        lambda c, s, _t: [VarWriteIndexer(c)],
+        lambda c, s, _t: [LineHitIndexer(c, dict.fromkeys(range(len(s.codes)), 0))],
+        lambda c, s, _t: [CallTreeIndexer(c)],
+        lambda c, s, _t: [ExceptionIndexer(c)],
+        lambda c, s, t: [DensityIndexer(c, t)],
+    ]
+    separate = 0.0
+    for factory in factories:
+        with ChronoReader.open(recording) as reader:
+            total = len(reader)
+            start = time.perf_counter()
+            build(recording, reader, lambda c, s, f=factory, t=total: f(c, s, t))
+            separate += time.perf_counter() - start
+
+    print(
+        f"single pass, 5 indexers: {single:.2f}s\n"
+        f"five passes, 1 each:     {separate:.2f}s  -> {separate / single:.1f}x the work"
+    )
+
+
 def main() -> int:
     workdir = Path(tempfile.mkdtemp())
     recording = _record(workdir)
@@ -123,6 +164,8 @@ def main() -> int:
         last_write_before(db, name_id, events // 2)
     print(f"  last-write-before-seq: {(time.perf_counter() - start) / 2000 * 1e6:.1f} us")
     db.close()
+
+    _passes(recording)
 
     print(f"\nlayouts, {SYNTHETIC_ROWS:,} synthetic rows over {DISTINCT_NAMES} names:")
     rng = random.Random(7)  # noqa: S311 -- reproducibility, not security

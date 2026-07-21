@@ -31,8 +31,11 @@ import hashlib
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 1
-"""Bumped whenever the DDL changes. A mismatch discards the index and rebuilds it."""
+SCHEMA_VERSION = 2
+"""Bumped whenever the DDL changes. A mismatch discards the index and rebuilds it.
+
+2 (day 27): `files` and `exc_types` interning tables, `codes.filename` became `file_id`,
+and `ix_frames_entry` was added for the live-at-seq range query."""
 
 INDEXER_VERSION = 1
 """Bumped whenever an indexer's *output* changes for unchanged input -- a fixed bug, a new
@@ -50,16 +53,22 @@ CREATE TABLE strings(id INTEGER PRIMARY KEY, text TEXT NOT NULL);
 --   query: "every write to `total`" -- the user types text, the index speaks ids.
 CREATE INDEX ix_strings_text ON strings(text);
 
--- One row per interned code object, with filename and qualname stored as text rather
--- than as string ids. `strings.id` *is* `name_id`, a different id space from `code_id`,
--- so a shared pool would need a second mapping table to keep Q8 a direct lookup -- and
--- interning buys nothing here anyway: this table has hundreds of rows, not millions.
--- That is where the size argument actually applies (ADR-0008 day-26 amendment).
--- Never anything requiring the original .pyc: a recording must be readable on a machine
--- that has never seen the program.
+-- Source files, interned. Their own id space, not `strings`, because `strings.id` *is*
+-- the recording's `name_id` and a shared pool would need a mapping table just to keep the
+-- text lookup direct. Interning here earns its place for one reason: `line_hits` has a
+-- row per executed line -- millions -- and each carries a `file_id` rather than a path.
+CREATE TABLE files(file_id INTEGER PRIMARY KEY, path TEXT NOT NULL);
+--   query: "every hit of this file:line" -- the user names a file, the index stores ids.
+CREATE INDEX ix_files_path ON files(path);
+
+-- Exception type names ("ValueError"), keyed by the recording's `exc_type_id`.
+CREATE TABLE exc_types(id INTEGER PRIMARY KEY, text TEXT NOT NULL);
+
+-- One row per interned code object. Never anything requiring the original .pyc: a
+-- recording must be readable on a machine that has never seen the program.
 CREATE TABLE codes(
     code_id INTEGER PRIMARY KEY,
-    filename TEXT NOT NULL,
+    file_id INTEGER NOT NULL,
     qualname TEXT NOT NULL,
     first_lineno INTEGER NOT NULL
 );
@@ -98,6 +107,10 @@ CREATE TABLE frames(
 );
 --   query: "the children of frame F, in call order"  -> the call tree, one level at a time
 CREATE INDEX ix_frames_parent ON frames(parent_frame_id, entry_seq);
+--   query: "which frames were live at seq S" -> entry_seq <= S AND (exit_seq > S OR NULL)
+--          A covering range scan. See `call_tree.py` on why this works for liveness even
+--          though the same intervals do NOT encode ancestry.
+CREATE INDEX ix_frames_entry ON frames(entry_seq, exit_seq);
 --   query: "every invocation of function F"          -> day 29's "who called this?"
 CREATE INDEX ix_frames_code ON frames(code_id, entry_seq);
 

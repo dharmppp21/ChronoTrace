@@ -831,6 +831,57 @@ an omission.
 
 ---
 
+## Day 27 — four more indexers, and the single-pass claim tested
+
+`json_pipeline`, 280,997 events.
+
+| | day 26 (1 indexer) | **day 27 (5 indexers)** |
+|---|---:|---:|
+| build | 1.18 s | **1.80 s** |
+| rate | 237,542 events/s | **156,167 events/s** |
+| rows | 85,221 | **272,566** |
+| index size | 5.4 B/event = 1.1× | **17.1 B/event = 3.5×** |
+
+**ADR-0008's original estimate is vindicated.** It predicted 14.5 B/event and 3.0×; day
+26 measured 1.1× with only `var_writes` and I recorded that the estimate looked generous.
+With `line_hits` — the largest table, one row per executed line — the real figure is
+**17.1 B/event, 3.5×**, slightly *worse* than predicted. The day-26 note was the
+incomplete measurement, not a wrong estimate.
+
+Consequence for the 10 GB case in ADR-0008 §6: ~2 billion events → a **~34 GB index**,
+which is worse than the 29 GB estimated. The threshold knob is still needed.
+
+### The single-pass driver, measured rather than asserted
+
+Day 26 justified the `Indexer` protocol on the claim that N indexers must not mean N
+reads. With five real implementations that claim is now testable:
+
+| | |
+|---|---:|
+| one pass, five indexers | **1.87 s** |
+| five passes, one indexer each | 5.92 s |
+| | **3.2× the work** |
+
+The abstraction pays. Note it is *not* 5× — a pass is dominated by decoding blocks and
+the per-indexer `consume` calls are cheap, so the saving is the read, not the dispatch.
+That is the number to quote, and it is the one that would have justified building the
+seam.
+
+### Layouts, re-measured with a second table in play
+
+Unchanged conclusion from day 26, on 2,000,000 synthetic rows:
+
+| layout | total | size |
+|---|---:|---:|
+| **`WITHOUT ROWID` (shipped)** | **3.72 s** | **35.5 MB** |
+| rowid, index after load | 4.26 s | 67.0 MB |
+| rowid, index before load | 4.26 s | 71.0 MB |
+
+"Create indexes after bulk load" is still exactly as fast as creating them first (4.26 s
+either way), and the clustered form still beats both on time and size.
+
+---
+
 ## Standing budgets
 
 | thing | budget | current | measured |

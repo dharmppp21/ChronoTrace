@@ -37,6 +37,8 @@ def test_the_ddl_applies_to_a_fresh_database(db: sqlite3.Connection) -> None:
     assert tables == {
         "meta",
         "strings",
+        "files",
+        "exc_types",
         "codes",
         "var_writes",
         "line_hits",

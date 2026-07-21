@@ -155,8 +155,7 @@ def _load_intern_tables(connection: sqlite3.Connection, strings: Strings) -> Non
         "INSERT OR REPLACE INTO strings(id, text) VALUES (?,?)", enumerate(strings.names)
     )
     connection.executemany(
-        "INSERT OR REPLACE INTO codes(code_id, filename, qualname, first_lineno) VALUES (?,?,?,?)",
-        ((i, c.filename, c.qualname, c.first_lineno) for i, c in enumerate(strings.codes)),
+        "INSERT OR REPLACE INTO exc_types(id, text) VALUES (?,?)", enumerate(strings.exc_types)
     )
 
 
