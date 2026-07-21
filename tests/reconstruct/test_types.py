@@ -21,8 +21,8 @@ def _state() -> ProgramState:
     return ProgramState(
         seq=42,
         frames=(
-            FrameState(1, 10, 5, None, False, {100: 200}),
-            FrameState(2, 11, 9, 1, True, {101: 201, 102: 202}),
+            FrameState(1, 10, 5, False, {100: 200}),
+            FrameState(2, 11, 9, True, {101: 201, 102: 202}),
         ),
         current_frame_id=2,
         exception=ExceptionState(exc_type_id=7, raised_at_seq=40, value_ref=99),
@@ -61,7 +61,6 @@ def test_from_keyframe_keeps_the_keyframe_instant_and_bindings() -> None:
     assert [f.frame_id for f in state.frames] == [1, 2]
     assert state.frames[1].suspended is True  # a suspended generator stays live
     assert state.frames[0].bindings == {100: 200}
-    assert all(f.parent_id is None for f in state.frames)  # overlaid from events later
 
 
 def test_a_trivial_fake_satisfies_the_reconstructor_protocol() -> None:
@@ -87,7 +86,6 @@ def test_as_dict_is_a_stable_id_based_wire_shape() -> None:
                 "frame_id": 1,
                 "code_id": 10,
                 "lineno": 5,
-                "parent_id": None,
                 "suspended": False,
                 "bindings": {100: 200},
             },
@@ -95,7 +93,6 @@ def test_as_dict_is_a_stable_id_based_wire_shape() -> None:
                 "frame_id": 2,
                 "code_id": 11,
                 "lineno": 9,
-                "parent_id": 1,
                 "suspended": True,
                 "bindings": {101: 201, 102: 202},
             },

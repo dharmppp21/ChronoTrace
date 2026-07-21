@@ -33,17 +33,13 @@ after the last returns. Matches the recorder's `frames.NO_FRAME` sentinel."""
 
 @dataclass(frozen=True, slots=True)
 class FrameState:
-    """One live frame at an instant: where it is, who called it, and what it holds.
+    """One live frame at an instant: where it is, and what it holds.
 
     Attributes:
         frame_id: the recorder's stable per-frame id (never `id(frame)`).
         code_id: interned code object -- resolves to filename/qualname elsewhere.
         lineno: the source line this frame is paused at (executing, or the call/yield it
             is suspended on).
-        parent_id: the frame that called this one (the call tree), or None for a root or
-            when unknown. A keyframe stores a flat frame *set* with no links, so this is
-            filled from CALL events during reconstruction and is authoritative only once
-            the day-27 call-tree index exists.
         suspended: a yielded generator/coroutine -- live, with live locals, but not on
             any thread's stack (the day-6 registry model, carried through).
         bindings: `name_id -> value_ref`, the frame's locals as pool references.
@@ -52,7 +48,6 @@ class FrameState:
     frame_id: int
     code_id: int
     lineno: int
-    parent_id: int | None
     suspended: bool
     bindings: Mapping[int, int]
 
@@ -92,14 +87,14 @@ class ProgramState:
         """The reconstruction baseline a keyframe encodes.
 
         A keyframe knows each live frame's code, line, suspension and bindings, but not
-        the call parents, the current-frame pointer, or an in-flight exception -- those
-        are overlaid from the events since the keyframe (day 20). So this fills what the
-        keyframe knows and leaves `parent_id=None`, `current_frame_id=NO_FRAME`,
-        `exception=None` for the overlay to complete. The `seq` carries through unchanged,
-        which is what keeps the instant semantics identical to the keyframe's.
+        the current-frame pointer or an in-flight exception -- those are overlaid from the
+        events since the keyframe. So this fills what the keyframe knows and leaves
+        `current_frame_id=NO_FRAME` and `exception=None` for the overlay to complete. The
+        `seq` carries through unchanged, which is what keeps the instant semantics
+        identical to the keyframe's.
         """
         frames = tuple(
-            FrameState(f.frame_id, f.code_id, f.lineno, None, f.suspended, dict(f.local_refs))
+            FrameState(f.frame_id, f.code_id, f.lineno, f.suspended, dict(f.local_refs))
             for f in keyframe.frames
         )
         return cls(seq=keyframe.seq, frames=frames, current_frame_id=NO_FRAME)
@@ -125,7 +120,6 @@ class ProgramState:
                     "frame_id": f.frame_id,
                     "code_id": f.code_id,
                     "lineno": f.lineno,
-                    "parent_id": f.parent_id,
                     "suspended": f.suspended,
                     "bindings": dict(f.bindings),
                 }
