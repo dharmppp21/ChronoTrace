@@ -22,6 +22,8 @@ earned by a second real caller today, not a hypothetical one.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+
 
 class InternTable[T]:
     """Assigns a stable small integer to each distinct value it sees.
@@ -74,6 +76,14 @@ class InternTable[T]:
         self._ids[value] = new_id
         self._values.append(value)
         return new_id
+
+    def __iter__(self) -> Iterator[T]:
+        """Every interned value in id order, so `enumerate` reconstructs the id -> value map.
+
+        Ids are dense from 0 (see the class docstring), which is what makes the position
+        in this iteration *be* the id. Bulk resolution is what every layer above needs.
+        """
+        return iter(self._values)
 
     def resolve(self, id_: int) -> T:
         """Return the value an id names.

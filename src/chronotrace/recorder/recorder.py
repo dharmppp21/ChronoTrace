@@ -194,6 +194,30 @@ class Recorder:
         """Events lost because the sink failed. Non-zero means the recording is incomplete."""
         return self._dropped
 
+    @property
+    def names(self) -> InternTable[str]:
+        """`name_id` -> variable name. Read-only; the recorder keeps interning while it runs.
+
+        Every layer above receives ids, so something has to map them back, and until the
+        `.chrono` format persists these tables (issue #6) the live recorder is the only
+        authority. That is also why `store` cannot own them.
+        """
+        return self._names
+
+    @property
+    def codes(self) -> InternTable[CodeType]:
+        """`code_id` -> the code object it names, for filename/qualname/first line."""
+        return self._codes
+
+    @property
+    def values(self) -> ValuePool:
+        """`value_ref` -> the captured representation.
+
+        Iterable in reference order, which is what a writer needs to persist the pool
+        under the references the events already cite.
+        """
+        return self._values
+
     def start(self) -> None:
         """Acquire a tool id and begin recording.
 

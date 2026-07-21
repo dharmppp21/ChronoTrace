@@ -21,6 +21,7 @@ day 4 because seven layers reference `ValueRef`; day 8 filled in the body.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from typing import NewType
 
 from chronotrace.recorder.capture import CapturedValue
@@ -88,6 +89,14 @@ class ValuePool:
         self._values.append(captured)
         self._cache.put(key, ref)
         return ref
+
+    def __iter__(self) -> Iterator[CapturedValue]:
+        """Every captured value, in reference order -- so `enumerate` gives back the refs.
+
+        Exists so a writer can persist the pool without reaching into it: the order *is*
+        the reference numbering, and any other order would break every event's `value_ref`.
+        """
+        return iter(self._values)
 
     def resolve(self, ref: ValueRef) -> CapturedValue:
         """Return the captured representation for `ref`.
