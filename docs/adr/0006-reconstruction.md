@@ -207,6 +207,63 @@ The measured outcome (benchmarks/RESULTS.md) also refined the cache: a playhead 
 3.7 ms until `deltas_between` was given the same block-level LRU that EVENTS blocks had —
 a drag re-decoded one DELTAS block thousands of times. It is now **119 µs**.
 
+## Amendment (day 21, on implementing backward stepping)
+
+**§3's decision is reversed: backward stepping does *not* invert deltas. It reconstructs
+at its destination like every other jump.** The reversal is on measurement, and the
+premise that failed is worth naming: §3 assumed the delta replay dominates a backward
+step. Splitting the cost (benchmarks/RESULTS.md) shows it does not, for a structural
+reason §3 did not see —
+
+> **The control-flow overlay is not invertible.** Deltas store `old_ref` precisely so
+> bindings can be undone. An event stores no *previous* `lineno`, so each frame's current
+> line must be re-derived from the keyframe however the bindings got there.
+
+| phase of a backward step | cost | invertible? |
+|---|---:|---|
+| delta replay | 231 µs | yes — all inversion could remove |
+| event overlay | 487 µs | **no** |
+
+Inversion's ceiling is therefore **32%** of an operation measured at **715 µs p50 / 1,521
+µs p99 — 11× inside a 60 fps frame budget**. Trading a second incremental state machine
+(the silently-drifting cache §4 calls unsurvivable) for ~230 µs nobody can perceive is a
+bad trade, so it was not built. Day 16's `old_ref` is not wasted: `invert` is what day
+22's replay-equivalence harness checks against, and it is the lever to pull if the overlay
+is ever promoted into the keyframe.
+
+**§2's reversal trigger has fired.** It read: *"if the control-flow overlay's event scan
+ever dominates the profile, promote the needed control-flow (current line per frame) into
+the keyframe or a new delta kind."* It now does dominate — 68% of a backward step. Not
+acted on today because the operation is already 11× inside budget; recorded so the next
+person to profile reconstruction finds the lever already identified rather than
+rediscovering it.
+
+### Stepping is a `seq` search, not a state walk
+
+The four operations (`step`, `step_over`, `step_out`, `seek`) are one directional scan
+over events, parameterised by the sign of the step, plus **one** `reconstruct` at the
+destination. Two consequences:
+
+- **Forward and backward cannot drift**, because they are the same function with the
+  opposite sign — the property `step_back(step_forward(seq)) == seq` is enforced at every
+  stop instant in every example recording.
+- **Backward stepping adds no new way to be silently wrong.** Where to stop is a pure
+  event query that cannot corrupt state; what the state is there is the already-proven
+  `reconstruct`. A state walk would have had to do both at once, in lockstep.
+
+`step_over` filtering on **`frame_id` and never `code_id`** is what makes recursion
+correct (four frames share one code object in `examples/simple.py`) and what makes
+`asyncio` interleaving free (other tasks' events are simply not in this frame).
+
+### The known ceiling, deliberately not half-fixed
+
+The scan is linear, so a `step_over_back` in a module-level frame scans 281k events and
+costs **0.63 s** (p50 is 1.8 µs — the distribution is bimodal, not uniformly slow).
+Iterating decoded blocks instead of `reader[seq]` would make it ~5× faster and still leave
+126 ms, four times over budget. **The constant factor is the wrong lever**; only day 30's
+line index, answering "previous LINE in frame F" as a lookup, fixes it. Tracked as issue
+#5.
+
 ## Consequences
 
 **Buys:** the product, at `O(log K + I)` — a binary search plus a bounded loop,

@@ -2,12 +2,11 @@
 
 **A time-travel debugger for Python.** Record your program once, then scrub backward through its execution to find the bug.
 
-> **Status: Phase 1 complete — the recorder works; storage and UI do not yet.**
-> ChronoTrace can record a Python program's full execution (every line, call,
-> return, exception and local value) into an in-memory event stream, with value
-> deduplication, scope filtering and secret redaction. It cannot yet **save** a
-> recording to disk, scrub through it, or show a UI — those are Phases 2–5. This
-> README describes what runs today and is honest about what does not.
+> **Status: you can step backward through a real Python program.** Recording
+> (Phase 1), the durable `.chrono` store (Phase 2) and reconstruction + stepping
+> (Phase 3, in progress) work today, from a terminal REPL. There is no UI yet —
+> that is Phase 5. This README describes what runs today and is honest about what
+> does not.
 
 ## Why
 
@@ -15,6 +14,51 @@ Debugging only goes forward. Breakpoints show you the program *now*, so the
 moment you realise the bug happened 200 steps ago, you restart and guess where
 to break — over and over. The information you needed was computed once and then
 thrown away. ChronoTrace keeps it.
+
+## Time travel
+
+Every command you already know, plus its mirror image in time:
+
+```bash
+chronotrace step examples/simple.py
+```
+
+```
+(chrono) g 39                    # jump to an instant
+[39] double (simple.py):19
+(chrono) bt
+* #5 double (simple.py):19
+  #3 quadruple (simple.py):24
+  #2 main (simple.py):31
+  #1 <module> (simple.py):36
+(chrono) p n                     # what was n, at that instant?
+n = 0
+(chrono) p                       # previous line
+[37] double (simple.py):18
+(chrono) p                       # back out of the call that just ran
+[34] quadruple (simple.py):24
+(chrono) O                       # step over, backward -- skips the whole call
+[26] quadruple (simple.py):23
+```
+
+| forward | backward | what it does |
+|---|---|---|
+| `n` | `p` | the next/previous line, in any frame — "step into", both ways |
+| `o` | `O` | the next/previous line **in this frame** — nested calls are skipped whole |
+| `f` | `F` | run to where this frame exits / back to where it was called |
+
+Backward commands are the *same code* as their forward twins with the sign of the
+scan flipped, so they cannot disagree: `step_back(step_forward(seq)) == seq` is
+asserted at every stop instant of every example recording. A backward step costs
+**715 µs** (p99 1.5 ms) — eleven times inside a 60 fps frame budget.
+
+Asking for a variable the program had not reached yet says so, rather than showing
+you `None`:
+
+```
+(chrono) p result
+result is not bound in this frame at seq 26
+```
 
 ## What works today
 
@@ -38,9 +82,11 @@ This runs the target under the recorder and reports the event count. The recorde
 - **No secrets** — locals named like `*password*`, `*token*`, `*secret*` are
   withheld *before* they are read, never scrubbed after.
 
-The `record` command reports to an in-memory sink today; **Phase 2 (below) built the
-durable, crash-recoverable `.chrono` store** the recorder writes into, and wiring it
-behind `record` is the next step.
+`chronotrace step script.py` records into the real `.chrono` format and opens the
+stepping session on it, so the demo above exercises the whole pipeline — writer,
+reader, reconstruction — not a shortcut. `chronotrace step rec.chrono` opens a saved
+recording, but renders numeric ids instead of names: the format does not yet persist
+its intern tables ([#6](https://github.com/dharmppp21/ChronoTrace/issues/6)).
 
 ## Overhead, measured not boasted
 
