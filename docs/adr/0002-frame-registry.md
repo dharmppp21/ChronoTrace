@@ -47,12 +47,20 @@ abandoned generator unwinding out of order. All three are ordinary Python, not
 edge cases, and each corrupts the call tree silently -- the frame structure would
 describe an execution that did not happen.
 
-### `id(frame)` as the key
+### `id(frame)` as the *durable identity*
 
 Frames are cheap to identify by address. **Rejected on two measured facts:**
 CPython reuses frame addresses, so `id()` collides across a recording; and frame
 objects are **not weakref-able**, so we cannot detect reuse the way `identity.py`
 does for user objects. A reused `id()` would fuse two unrelated calls.
+
+> **Amendment (day 24, halfway review).** This heading said "as the key", which was
+> imprecise enough to be wrong: `id(frame)` *is* the registry's live-map key
+> (`FrameRegistry._live`), and only the durable `frame_id` handed to events is a
+> counter. The distinction is the whole safety argument — an address may be reused
+> once its previous owner is gone, and the map is swept on frame death, so a reused
+> address always finds an empty slot. See the day-22 amendment below for the case
+> where that assumption failed.
 
 ### The code object as the key
 
@@ -84,3 +92,20 @@ recorded instead: on **CPython < 3.13**, `sys.monitoring` does not emit
 `PY_UNWIND` when a generator is finalised by GC, so an abandoned generator's frame
 leaks on 3.12 only (fixed in 3.13; pinned by an xfail test). It is unfixable at
 the recorder level there, because no event fires and frames cannot be weakref'd.
+
+## Amendment (day 22) — the leaked entry made address reuse bite after all
+
+The safety argument above ("a reused address always finds an empty slot, because the
+map is swept on frame death") holds only if **every frame that enters also exits**. The
+limitation in the previous paragraph is exactly a case where one does not: on 3.12 an
+abandoned generator's entry leaks. CPython then reused the freed frame's address, the
+registry found the stale entry, and `enter()` handed a brand-new frame the dead one's
+`frame_id` — **fusing two unrelated frames**, which is precisely what this ADR exists to
+prevent, arriving through the back door.
+
+Found by the day-22 equivalence harness as `FRAME_ENTER for frame 9, which is already
+live`, and latent since day 6. Fixed where the callers already knew the answer:
+`enter(frame, *, resuming=)`. A `PY_START` is by definition a frame that did not exist a
+moment ago, so it never recovers an id; only `PY_RESUME` does, which is the recovery this
+ADR is *for*. The decision stands; the implementation was reasoning from an assumption
+the interpreter does not always honour.
