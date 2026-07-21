@@ -107,6 +107,7 @@ class ChronoReader:
         "_cache_blocks",
         "_count",
         "_delta_blocks",
+        "_delta_cache",
         "_file",
         "_keyframes",
         "_mmap",
@@ -129,6 +130,7 @@ class ChronoReader:
         self._file = file
         self._cache_blocks = cache_blocks
         self._cache: OrderedDict[int, list[Event]] = OrderedDict()
+        self._delta_cache: OrderedDict[int, list[Delta]] = OrderedDict()
         self._blocks: list[_Block] = []
         self._starts: list[int] = []
         self._count = 0
@@ -453,13 +455,28 @@ class ChronoReader:
         return out
 
     def _decode_delta_block(self, offset: int) -> list[Delta]:
+        """Decode one DELTAS block, memoised by the same LRU discipline as EVENTS blocks.
+
+        Reconstruction and a playhead drag hit the *same* block over and over (a step is
+        one event; a block spans thousands), so decoding it per call dominated the
+        measured step latency. Caching the decoded deltas -- the most-processed form --
+        turns a repeat into a dict hit, exactly as `_decode` does for events.
+        """
+        cached = self._delta_cache.get(offset)
+        if cached is not None:
+            self._delta_cache.move_to_end(offset)
+            return cached
         try:
             _bt, flags, payload, _next = decode_block(self._buf, offset)  # CRC-checked
             body = payload[DELTA_RANGE_SIZE:]  # drop the uncompressed (first, last) span
             raw = decompress(body) if flags & BlockFlag.COMPRESSED_ZSTD else body
-            return decode_deltas(raw)  # allocations bounded (delta.py)
+            deltas = decode_deltas(raw)  # allocations bounded (delta.py)
         except (BlockError, ValueError, struct.error) as exc:
             raise CorruptRecording(f"delta block at offset {offset}: {exc}") from exc
+        self._delta_cache[offset] = deltas
+        if len(self._delta_cache) > self._cache_blocks:
+            self._delta_cache.popitem(last=False)
+        return deltas
 
     # -- lifecycle ----------------------------------------------------------
 
@@ -474,6 +491,7 @@ class ChronoReader:
     def close(self) -> None:
         """Release the mmap and file. Idempotent."""
         self._cache.clear()
+        self._delta_cache.clear()
         self._pool = None
         if self._mmap is not None:
             self._mmap.close()
