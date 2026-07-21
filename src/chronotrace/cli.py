@@ -1,7 +1,9 @@
-"""The `chronotrace` command: record a script, and repair a crashed recording.
+"""The `chronotrace` command: record a script, step through it, repair a crashed recording.
 
 `chronotrace record script.py [args...]` executes the target as `__main__` with
-recording on, scoped by default to the script's own directory. `chronotrace repair
+recording on, scoped by default to the script's own directory. `chronotrace step
+script.py` records it and drops into the stepping REPL -- forward *and* backward --
+which is the product in its smallest usable form until the UI lands. `chronotrace repair
 rec.chrono` rebuilds the footer of a recording whose writer was killed mid-write, so
 later opens are O(1) again -- and reports the truncation, because a recovered recording
 is incomplete and the user must never be told otherwise.
@@ -13,6 +15,7 @@ the recorder's process would then carry (see the zero-deps note in pyproject.tom
 from __future__ import annotations
 
 import argparse
+import io
 import os
 import runpy
 import sys
@@ -22,11 +25,12 @@ from chronotrace.config import RecorderConfig, find_pyproject, load_config
 from chronotrace.recorder import MemorySink, Recorder
 from chronotrace.recorder.redact import Redactor
 from chronotrace.recorder.scope import Scope
-from chronotrace.store import ChronoError, ChronoReader, repair
+from chronotrace.repl import Repl
+from chronotrace.store import ChronoError, ChronoReader, ChronoWriter, repair
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """The argument parser. A `record` subcommand leaves room for `replay` (day 30+)."""
+    """The argument parser. Subcommands leave room for `serve` (day 33+)."""
     parser = argparse.ArgumentParser(prog="chronotrace", description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -45,6 +49,10 @@ def build_parser() -> argparse.ArgumentParser:
     rec.add_argument("script", help="the Python script to record")
     rec.add_argument("script_args", nargs=argparse.REMAINDER, help="arguments passed to the script")
 
+    stp = sub.add_parser("step", help="step through an execution, forward and backward")
+    stp.add_argument("target", help="a .py script to record and step, or a .chrono recording")
+    stp.add_argument("script_args", nargs=argparse.REMAINDER, help="arguments passed to the script")
+
     rep = sub.add_parser("repair", help="rebuild the footer of a crash-truncated recording")
     rep.add_argument("file", help="the .chrono file to repair")
     rep.add_argument(
@@ -57,7 +65,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def record_script(
     script: str, script_args: list[str], config: RecorderConfig, sink: MemorySink
-) -> None:
+) -> Recorder:
     """Execute `script` as `__main__` under the recorder, into `sink`.
 
     Scope defaults to the script's own directory when the config names no roots,
@@ -69,6 +77,10 @@ def record_script(
         script_args: arguments to expose to the target as `sys.argv[1:]`.
         config: resolved, immutable recording settings.
         sink: where events are written.
+
+    Returns:
+        The recorder, for its intern tables and value pool -- the only place `name_id`
+        and `code_id` can currently be resolved back to text (issue #6).
 
     Complexity: dominated by running the target program.
     """
@@ -87,6 +99,7 @@ def record_script(
             runpy.run_path(str(script_path), run_name="__main__")
     finally:
         sys.argv = saved_argv
+    return recorder
 
 
 def repair_recording(path: str, out: str | None) -> int:
@@ -113,6 +126,63 @@ def repair_recording(path: str, out: str | None) -> int:
         f"lost its tail -- and stays flagged truncated."
     )
     return 0
+
+
+def step_command(args: argparse.Namespace) -> int:
+    """Open a stepping session on a `.chrono` file, or on a script recorded right now.
+
+    Two inputs because they trade off against each other: a `.chrono` on disk is the real
+    artefact but renders raw ids, since the format does not yet persist its intern tables
+    (issue #6); recording the script here keeps the recorder alive, so variables and
+    functions have names. Both drive the identical reader/reconstruct path -- the script
+    form writes a real recording to memory rather than shortcutting past the format.
+    """
+    target = Path(args.target)
+    if target.suffix == ".chrono":
+        try:
+            with ChronoReader.open(target) as reader:
+                Repl(reader).run()
+        except ChronoError as exc:
+            print(f"chronotrace: cannot read {target}: {exc}", file=sys.stderr)  # noqa: T201
+            return 1
+        return 0
+
+    config = load_config(pyproject=find_pyproject(), env=os.environ, cli={})
+    sink = MemorySink()
+    recorder = record_script(str(target), args.script_args, config, sink)
+    if not sink.events:
+        print(  # noqa: T201
+            "chronotrace: nothing was recorded -- the scope may exclude all of your code.",
+            file=sys.stderr,
+        )
+        return 1
+    with ChronoReader.from_bytes(_to_chrono(recorder, sink)) as reader:
+        Repl(reader, names=dict(enumerate(recorder.names)), codes=_codes(recorder)).run()
+    return 0
+
+
+def _to_chrono(recorder: Recorder, sink: MemorySink) -> bytes:
+    """Write a finished in-memory recording to `.chrono` bytes.
+
+    Values go in first and in reference order, so the pool's own content-addressed
+    numbering lands on the `value_ref`s the events already cite.
+    """
+    buf = io.BytesIO()
+    writer = ChronoWriter(buf)
+    for captured in recorder.values:
+        writer.add_value(captured)
+    for event in sink.events:
+        writer.add(event)
+    writer.close()
+    return buf.getvalue()
+
+
+def _codes(recorder: Recorder) -> dict[int, str]:
+    """`code_id` -> "qualname (filename)", the shortest text that identifies a frame."""
+    return {
+        i: f"{code.co_qualname} ({Path(code.co_filename).name})"
+        for i, code in enumerate(recorder.codes)
+    }
 
 
 def record_command(args: argparse.Namespace) -> int:
@@ -146,6 +216,8 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "repair":
         return repair_recording(args.file, args.out)
+    if args.command == "step":
+        return step_command(args)
     return record_command(args)
 
 
