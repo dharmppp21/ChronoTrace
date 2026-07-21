@@ -15,10 +15,10 @@ from __future__ import annotations
 
 import random
 
-from conftest import BLOCK_EVENTS, KEYFRAME_INTERVAL  # type: ignore[import-not-found]
-
 from chronotrace.reconstruct import KeyframeReconstructor, reconstruct_slow
 from chronotrace.store import ChronoReader
+
+from .conftest import BLOCK_EVENTS, KEYFRAME_INTERVAL
 
 
 def _boundary_seqs(n: int) -> list[int]:

@@ -116,7 +116,7 @@ def harness_oracle(workdir: Path, like: Mismatch, *, entry: str = "main") -> Ora
     scope = Scope(roots=[str(workdir)])
 
     def still_fails(source: str) -> bool:
-        entry_point = _load(workdir, f"_shrink{next(counter)}", source, entry)
+        entry_point = load_program(workdir, f"_shrink{next(counter)}", source, entry)
         if entry_point is None:
             return False
         try:
@@ -128,8 +128,15 @@ def harness_oracle(workdir: Path, like: Mismatch, *, entry: str = "main") -> Ora
     return still_fails
 
 
-def _load(workdir: Path, name: str, source: str, entry: str) -> Callable[[], object] | None:
-    """Write, import and return `source`'s entry point, or None if it will not load."""
+def load_program(workdir: Path, name: str, source: str, entry: str) -> Callable[[], object] | None:
+    """Write, import and return `source`'s entry point, or None if it will not load.
+
+    Shared with the day-23 property campaign, which turns generated source into something
+    recordable exactly the same way. The caller supplies `name` because the two have
+    different needs: minimisation counts upwards, while the campaign hashes the source so
+    a Hypothesis replay of the same program loads the same module -- see
+    `tests/property/test_pipeline.py` on why that matters for shrinking.
+    """
     path = workdir / f"{name}.py"
     path.write_text(source, encoding="utf-8")
     spec = importlib.util.spec_from_file_location(name, path)

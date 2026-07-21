@@ -9,11 +9,6 @@ itself.
 from __future__ import annotations
 
 import pytest
-from conftest import (  # type: ignore[import-not-found]
-    KEYFRAME_INTERVAL,
-    build_events,
-    write_recording,
-)
 
 from chronotrace.reconstruct import (
     KeyframeReconstructor,
@@ -23,6 +18,12 @@ from chronotrace.reconstruct import (
 )
 from chronotrace.reconstruct.types import NO_FRAME
 from chronotrace.store import ChronoReader
+
+from .conftest import (
+    KEYFRAME_INTERVAL,
+    build_events,
+    write_recording,
+)
 
 
 def test_seq_zero_is_the_floor(reader: ChronoReader) -> None:
