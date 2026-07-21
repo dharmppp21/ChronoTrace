@@ -51,7 +51,7 @@ FORMAT_VERSION_MAJOR = 1
 """Incompatible-change counter. A reader MUST refuse a file whose major exceeds
 its own -- the layout may have changed in ways it cannot parse."""
 
-FORMAT_VERSION_MINOR = 5
+FORMAT_VERSION_MINOR = 6
 """Backward-compatible-addition counter. A reader MAY open a file with a higher
 minor than its own: new *optional* blocks are skippable and new header fields live
 past `header_size`. It MUST NOT guess at anything it does not recognise.
@@ -75,6 +75,12 @@ past `header_size`. It MUST NOT guess at anything it does not recognise.
   the dead binding alive, which is the bug (#7) this fixes; a current reader deletes
   it. Recorded as a version because the *meaning* of existing bytes changed, which is
   exactly the kind of drift a spec exists to pin down.
+* 6 (day 26) activated the optional `STRINGS` block, reserved as `0x0002` since day 11
+  and unused until now: the recording's own intern tables, so `name_id`/`code_id`/
+  `exc_type_id` can be resolved to text by anyone holding the file. Required before the
+  index could exist at all -- an index must be rebuildable from the recording alone, and
+  without these a query cannot turn the name a user types into the id events carry
+  (ADR-0008 section 7). Optional, so an older reader skips it and sees ids.
 
 A current reader reads every earlier file unchanged; an older reader opening a newer
 file skips the optional blocks it does not know and loses only fast seek, not data."""

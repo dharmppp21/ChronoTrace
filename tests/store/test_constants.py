@@ -25,7 +25,7 @@ _KNOWN_SIGNATURES = (
 
 def test_header_byte_layout_is_pinned() -> None:
     """A known header must serialise to these exact 32 bytes. See format-spec §12."""
-    golden = bytes.fromhex("894348524f4e4f0d0a1a0a010005000000000000000000200000000000000000")
+    golden = bytes.fromhex("894348524f4e4f0d0a1a0a010006000000000000000000200000000000000000")
     packed = c.HEADER.pack(
         c.MAGIC, c.FORMAT_VERSION_MAJOR, c.FORMAT_VERSION_MINOR, 0, c.HEADER_SIZE
     )

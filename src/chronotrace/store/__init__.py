@@ -40,17 +40,20 @@ from chronotrace.store.errors import (
 from chronotrace.store.keyframe import FrameSnapshot, Keyframe
 from chronotrace.store.reader import ChronoReader
 from chronotrace.store.recovery import repair
+from chronotrace.store.strings import CodeInfo, Strings
 from chronotrace.store.writer import ChronoWriter, FileSink
 
 __all__ = [
     "ChronoError",
     "ChronoReader",
     "ChronoWriter",
+    "CodeInfo",
     "CorruptRecording",
     "Delta",
     "FileSink",
     "FrameSnapshot",
     "Keyframe",
+    "Strings",
     "TruncatedRecording",
     "UnsupportedVersion",
     "apply",

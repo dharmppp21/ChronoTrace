@@ -210,6 +210,11 @@ class Recorder:
         return self._codes
 
     @property
+    def exc_types(self) -> InternTable[str]:
+        """`exc_type_id` -> the exception type's name (`"ValueError"`)."""
+        return self._exc_types
+
+    @property
     def values(self) -> ValuePool:
         """`value_ref` -> the captured representation.
 

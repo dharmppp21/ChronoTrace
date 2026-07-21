@@ -79,6 +79,7 @@ from chronotrace.store.constants import (
 from chronotrace.store.delta import DELTA_RANGE, Delta, derive, encode_deltas
 from chronotrace.store.framing import encode_block
 from chronotrace.store.keyframe import DEFAULT_KEYFRAME_INTERVAL, KF_SEQ, LiveState
+from chronotrace.store.strings import Strings, encode_strings
 from chronotrace.store.valuepool import ValuePoolWriter
 
 DEFAULT_BLOCK_EVENTS = 4096
@@ -117,6 +118,7 @@ class ChronoWriter:
         "_offset",
         "_pool",
         "_stream",
+        "_strings",
     )
 
     def __init__(
@@ -135,6 +137,7 @@ class ChronoWriter:
         self._deltas: list[Delta] = []
         self._live = LiveState()
         self._pool = ValuePoolWriter()
+        self._strings = Strings()
         self._index: list[tuple[int, int, int]] = []  # (block_type, offset, length)
         self._offset = 0
         self._closed = False
@@ -167,6 +170,16 @@ class ChronoWriter:
         """
         return self._pool.add(captured)
 
+    def add_strings(self, strings: Strings) -> None:
+        """Attach the recording's intern tables, written as the STRINGS section at close.
+
+        Takes plain data rather than the recorder's `InternTable`, so the store keeps
+        depending on the recorder's *event model* only and never its runtime machinery
+        (the architecture rule in `docs/architecture.md`). Replaces any previous call --
+        the tables are a single snapshot taken when recording stops, not an accumulation.
+        """
+        self._strings = strings
+
     def close(self, *, truncated: bool = False) -> None:
         """Flush events, write the value pool, then the index and EOCD. Idempotent.
 
@@ -177,6 +190,12 @@ class ChronoWriter:
             return
         self._closed = True
         self._flush()
+        if self._strings:
+            self._write_block(
+                BlockType.STRINGS,
+                compress(encode_strings(self._strings), level=self._level),
+                BlockFlag.COMPRESSED_ZSTD,
+            )
         if self._pool:
             # ponytail: one VALUES block. Split into size-bounded blocks with a global
             # ref->block directory only when a pool outgrows a block (day 15+ needs it).

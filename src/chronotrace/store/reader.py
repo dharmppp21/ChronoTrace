@@ -82,6 +82,7 @@ from chronotrace.store.errors import CorruptRecording, TruncatedRecording, Unsup
 from chronotrace.store.framing import BlockError, decode_block
 from chronotrace.store.keyframe import KF_SEQ, KF_SEQ_SIZE, Keyframe, decode_keyframe
 from chronotrace.store.recovery import walk_blocks
+from chronotrace.store.strings import Strings, decode_strings
 from chronotrace.store.valuepool import decode_pool, unpack_value
 
 DEFAULT_CACHE_BLOCKS = 8
@@ -113,6 +114,8 @@ class ChronoReader:
         "_mmap",
         "_pool",
         "_starts",
+        "_strings",
+        "_strings_offset",
         "_truncated",
         "_values_offset",
     )
@@ -137,6 +140,8 @@ class ChronoReader:
         self._truncated = False
         self._values_offset: int | None = None
         self._pool: list[bytes] | None = None  # the decoded value pool, decoded once, lazily
+        self._strings: Strings | None = None  # the intern tables, decoded once, lazily
+        self._strings_offset: int | None = None
         self._keyframes: list[tuple[int, int]] = []  # (seq, block_offset), sorted by seq
         self._delta_blocks: list[tuple[int, int, int]] = []  # (first_seq, last_seq, offset)
         self._validate_header()
@@ -229,6 +234,9 @@ class ChronoReader:
             if entry_type == BlockType.VALUES:
                 if self._in_bounds(offset, length):
                     self._values_offset = offset
+            elif entry_type == BlockType.STRINGS:
+                if self._in_bounds(offset, length):
+                    self._strings_offset = offset
             elif entry_type == BlockType.KEYFRAMES:
                 self._record_keyframe(offset, length)
             elif entry_type == BlockType.DELTAS:
@@ -258,6 +266,8 @@ class ChronoReader:
                 locations.append((offset, count))
             elif block_type == BlockType.VALUES:
                 self._values_offset = offset
+            elif block_type == BlockType.STRINGS:
+                self._strings_offset = offset
             elif block_type == BlockType.KEYFRAMES:
                 self._record_keyframe(offset, nxt - offset)
             elif block_type == BlockType.DELTAS:
@@ -382,6 +392,33 @@ class ChronoReader:
             raise IndexError(f"value_ref {ref} out of range [0, {len(blobs)})")
         return unpack_value(blobs[ref])
 
+    def strings(self) -> Strings:
+        """The recording's intern tables: `name_id`/`code_id`/`exc_type_id` -> text.
+
+        Decoded once, lazily, and cached -- most opens never need them, and the ones that
+        do (the indexer, the REPL, the day-33 server) need them all at once. A recording
+        written before format 1.6, or one whose STRINGS block was lost to a crash, returns
+        empty tables rather than raising: ids without names are a degraded view, not a
+        broken one.
+
+        Raises:
+            CorruptRecording: the STRINGS block is present but damaged or hostile.
+        """
+        if self._strings is not None:
+            return self._strings
+        if self._strings_offset is None:
+            self._strings = Strings()
+            return self._strings
+        try:
+            _bt, flags, payload, _next = decode_block(
+                self._buf, self._strings_offset
+            )  # CRC-checked
+            raw = decompress(payload) if flags & BlockFlag.COMPRESSED_ZSTD else payload
+            self._strings = decode_strings(raw)  # allocations bounded (strings.py)
+        except (BlockError, ValueError, struct.error) as exc:
+            raise CorruptRecording(f"strings at offset {self._strings_offset}: {exc}") from exc
+        return self._strings
+
     def _pool_blobs(self) -> list[bytes]:
         if self._pool is not None:
             return self._pool
@@ -493,6 +530,7 @@ class ChronoReader:
         self._cache.clear()
         self._delta_cache.clear()
         self._pool = None
+        self._strings = None
         if self._mmap is not None:
             self._mmap.close()
             self._mmap = None
