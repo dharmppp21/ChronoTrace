@@ -48,6 +48,8 @@ the project: read in order, it explains how each decision forced the next.
 | [0004](0004-chrono-file-format.md) | A purpose-built columnar `.chrono` format | Accepted |
 | [0005](0005-storage-defaults.md) | Storage defaults chosen by measurement (block size, interval, level) | Accepted |
 | [0006](0006-reconstruction.md) | Reconstruction: keyframe + bounded delta replay, O(1) backward via inversion | Accepted |
+| [0007](0007-halfway-review.md) | The halfway review: what drifted, what to build differently, and the scope boundary | Accepted |
+| [0008](0008-index-schema.md) | The index: SQLite sidecar, built after recording, every index justified by a named query | Accepted |
 
 ## Baseline decisions not recorded here
 

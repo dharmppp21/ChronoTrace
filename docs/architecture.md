@@ -61,16 +61,17 @@ format stays free to change independently of how observation works.
 
 ## What exists today
 
-`recorder` (Phase 1) and most of `store` (Phase 2) are implemented; the layers above
-are names in this diagram. The recorder produces an event stream, and the store now
-persists it durably, compresses it, and makes any past instant reachable.
+`recorder`, `store` and `reconstruct` are implemented: a program can be recorded,
+persisted durably, and scrubbed backward instant by instant. `index` is designed and its
+schema shipped; the layers above it are names in this diagram.
 
 | Layer | Status | Built |
 |---|---|---|
 | recorder | **done** | days 4–10 |
 | store | **done (M2, day 18)** — writer + reader + zstd + value pool + keyframes + deltas + crash recovery, defaults tuned by grid ([`docs/format-spec.md`](format-spec.md), [ADR-0005](adr/0005-storage-defaults.md)) | days 11–18 |
-| reconstruct | **designed** ([ADR-0006](adr/0006-reconstruction.md)); `ProgramState`/`Reconstructor` types shipped, algorithm day 20 | days 19–22 |
-| index, query, server, frontend | planned | phases 3–5 |
+| reconstruct | **done (M3, day 24)** — `reconstruct(seq)` in O(log K), backward stepping, replay-equivalence referee ([ADR-0006](adr/0006-reconstruction.md)) | days 19–24 |
+| index | **designed** ([ADR-0008](adr/0008-index-schema.md)); schema shipped, indexers day 26 | days 25–31 |
+| query, server, frontend | planned | phases 4–5 |
 
 ## The storage format
 
@@ -106,6 +107,23 @@ ref as well as the new, a step backward is one delta inverted, not a rewind.
 `store/delta.py` owns the delta and the two pure functions `apply` (forward) and
 `invert` (backward), whose referee is the property `invert(apply(s, d)) == s`.
 Reconstruction (day 21) is the layer that drives this codec to answer "state at S".
+
+## The index: making the past queryable
+
+Reconstruction answers one instant at a time. Debugging asks timeline-wide questions —
+*who last wrote to `total`?*, *where did this exception originate?* — which cost
+O(events) each to replay. The `index` layer precomputes them into a **SQLite sidecar**
+(`recording.chrono.idx`), turning each into a B-tree lookup: the demo query, "the last
+write to `x` before `seq`", measures **37 µs**.
+
+It is **derived state and never authoritative**: every fact comes from the `.chrono`, so
+the index can be deleted at any time, rebuilt from the recording alone, and is discarded
+rather than trusted when a stamped fingerprint says the recording changed. It stores
+**pointers, not events** — the events stay in the `.chrono` — which is what keeps it to
+14.5 bytes per event. That is still three times the size of the recording, because a
+B-tree of pointers is uncompressed while the recording is columnar and zstd'd; the
+tradeoff, the timing decision, and the 10 GB consequence are all in
+[ADR-0008](adr/0008-index-schema.md).
 
 ## How correctness is established
 
