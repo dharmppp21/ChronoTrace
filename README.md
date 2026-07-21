@@ -2,11 +2,13 @@
 
 **A time-travel debugger for Python.** Record your program once, then scrub backward through its execution to find the bug.
 
-> **Status: you can step backward through a real Python program.** Recording
-> (Phase 1), the durable `.chrono` store (Phase 2) and reconstruction + stepping
-> (Phase 3, in progress) work today, from a terminal REPL. There is no UI yet —
-> that is Phase 5. This README describes what runs today and is honest about what
-> does not.
+> **Status: the engine is done** (`v0.3.0-timetravel`, day 24 of 50). Recording,
+> the durable `.chrono` store, and reconstruction with backward stepping all work
+> today, from a terminal REPL. Queries are Phase 4; the web UI is Phase 5. This
+> README describes what runs today and is honest about what does not.
+
+<!-- DEMO GIF: clip #4 — stepping backward from a wrong total to the aliased dict.
+     Recorded from the transcript under "Finding a real bug, backwards" below. -->
 
 ## Why
 
@@ -15,9 +17,44 @@ moment you realise the bug happened 200 steps ago, you restart and guess where
 to break — over and over. The information you needed was computed once and then
 thrown away. ChronoTrace keeps it.
 
-## Time travel
+## Finding a real bug, backwards
 
-Every command you already know, plus its mirror image in time:
+`examples/buggy_pipeline.py` prints three regional totals that are all identical —
+obviously wrong, no traceback, and every `+=` looks correct if you step forward.
+The cause is 815 events upstream: `dict.fromkeys` evaluates its default **once**, so
+all three regions share one dict.
+
+```bash
+chronotrace step examples/buggy_pipeline.py
+```
+
+```
+ north: $11235.00 (90 orders)      ← the symptom: three identical totals
+ south: $11235.00 (90 orders)
+  east: $11235.00 (90 orders)
+882 events. `?` for help, `q` to quit.
+
+(chrono) g 869                     # the instant the report was built
+[869] main (buggy_pipeline.py):60
+(chrono) p report
+report = {"north": {"sales": 11235.0, "orders": 90},
+          "south": {"$": "cycle"},   ← not a copy. the same object.
+          "east":  {"$": "cycle"}}
+(chrono) F                         # back to where this frame was called
+[48] main (buggy_pipeline.py):58
+(chrono) g 54                      # ...and back to the very first write
+[54] build_report (buggy_pipeline.py):51
+(chrono) p totals
+totals = {"north": {"sales": 0.0, "orders": 0},
+          "south": {"$": "cycle"},   ← already aliased, before a single order
+          "east":  {"$": "cycle"}}
+```
+
+The bug is visible at **seq 54** with all-zero totals — 815 events before the symptom
+it causes. That is the whole product thesis: the evidence was computed once and thrown
+away, and this keeps it.
+
+## Every command, in both directions
 
 ```bash
 chronotrace step examples/simple.py
@@ -49,8 +86,18 @@ n = 0
 
 Backward commands are the *same code* as their forward twins with the sign of the
 scan flipped, so they cannot disagree: `step_back(step_forward(seq)) == seq` is
-asserted at every stop instant of every example recording. A backward step costs
-**715 µs** (p99 1.5 ms) — eleven times inside a 60 fps frame budget.
+asserted at every stop instant of every example recording.
+
+| reaching an instant in a 281k-event recording | measured |
+|---|---:|
+| cold random jump | **12 ms** p50 |
+| one step through the locality cache | **65 µs** p50 |
+| one step backward | **715 µs** p50, 1.5 ms p99 |
+| replay depth vs. the ≤ 1,000 contract | **996** — holds |
+
+**[How it works →](docs/how-it-works.md)** — keyframes and deltas, why frames are a
+registry rather than a stack, and how correctness is proven against an
+independently-observed ground truth.
 
 Asking for a variable the program had not reached yet says so, rather than showing
 you `None`:
@@ -95,24 +142,26 @@ i5-13450HX, Windows 11, Python 3.14, medians of 5. Full tables and methodology i
 
 | Workload | Control-flow only | With value capture |
 |---|---:|---:|
-| Realistic pipeline (stdlib-heavy) | **5.4×** | capture-bound* |
+| Realistic pipeline (stdlib-heavy) | **6.7×** | ~1,440×* |
 | Tight numeric loop (worst case) | ~102× | ~1,270× |
 | I/O-bound (the control) | 1.0× | 1.0× |
 
 Content-addressed deduplication cuts recording size by **97.9%** on the realistic
 workload; scope filtering via `DISABLE` cuts realistic control-flow overhead
-**33×** (180× → 5.4×). For honest comparison, `pdb` is widely cited at 50–100×.
+**33×**. For honest comparison, `pdb` is widely cited at 50–100×.
 
 \* Value capture is correct and bounded but not yet fast — it re-serialises each
 changed value; the per-value cost (~827 µs for a large value) is Phase 6's
 optimisation target (day 40), measured and isolated, not hand-waved.
 
-## How it will work
+## How it works
 
 State is stored the way a video codec stores frames: **full keyframes every N
-events, deltas in between.** Reaching any past instant is then a binary search to
-the nearest keyframe plus a bounded number of deltas — which is what makes
-scrubbing feel instant instead of requiring a re-run.
+events, deltas in between.** Reaching any past instant is a binary search to the
+nearest keyframe plus a bounded number of deltas — which is what makes scrubbing
+feel instant instead of requiring a re-run. Deltas store the **old** reference as
+well as the new, so they can be undone, which is what makes backward stepping
+cheap. [The long version.](docs/how-it-works.md)
 
 ```
  target.py ─▶ recorder ─▶ store ─▶ index ─▶ reconstruct ─▶ query ─▶ server ─▶ UI

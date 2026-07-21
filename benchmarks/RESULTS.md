@@ -725,6 +725,66 @@ Rejected on the numbers; see the ADR-0006 day-21 amendment.
 
 ---
 
+## Day 24 — Checkpoint 3 (M3): the engine, measured
+
+Same machine as every earlier checkpoint (i5-13450HX, Windows 11, Python 3.14).
+
+### Reconstruction, against the contract
+
+| | Checkpoint 2 (day 18) | **Checkpoint 3 (day 24)** | |
+|---|---:|---:|---|
+| replay depth, max | — | **996 events** | contract ≤ 1,000 — **HOLDS** |
+| cold random jump, p50 | 18.1 ms (day 20) | **12.0 ms** | −34% |
+| cold random jump, p99 | — | 47.0 ms | |
+| cached +1 step (a drag), p50 | 119 µs (day 20) | **64.6 µs** | −46% |
+| backward step, p50 | 715 µs (day 21) | 715 µs | 11× inside a 60 fps frame |
+| oracle at mid-recording | — | 494 ms | **41×** the fast path, as intended |
+| resolve one value | 238 µs / 0.29 µs | **142 µs / 0.18 µs** | cold / cached |
+
+**No regression anywhere.** The two improvements are the day-20 delta-block LRU and the
+day-21 work settling; neither was tuned today.
+
+### Recording overhead, after the `del` fix
+
+Day 24 added deletion detection to the recorder's hot path — one set of the frame's live
+name ids per line.
+
+| | before | after | |
+|---|---:|---:|---|
+| `json_pipeline`, capture on | 35.2 s | 36.5 s | **+3.7%** — inside the 10% budget |
+| flow-only (scoped) | — | **6.7×** | ADR-0001's trigger is 20× |
+| with capture (scoped) | ~2,100× (day 9) | **1,440×** | |
+
+### A measurement trap, recorded so nobody repeats it
+
+The first overhead number today came out at **5,769×**, which looks like a catastrophic
+regression and is not one. Two things were wrong with the measurement, and both are easy
+to repeat:
+
+1. **`Scope(include=["*"])` disables scoping.** `benchmarks/bench_reconstruct.py` uses it
+   deliberately, to get a large recording out of a small workload — it records the stdlib
+   too. That configuration is *pre-day-9* and must never be compared against the overhead
+   table, which is measured with real scoping. Unscoped flow-only measures **260×**
+   against a scoped **6.7×**.
+2. **The ratio divides by a 6.4 ms baseline.** At that scale the multiplier swings on
+   timing noise; the absolute recorded time is the stable number. Before/after on the
+   *same* build is the only comparison that means anything — that is where +3.7% came
+   from.
+
+### Suite
+
+| | Checkpoint 1 | Checkpoint 2 | **Checkpoint 3** |
+|---|---:|---:|---:|
+| tests | 148 | 250 | **400** |
+| full suite, 3.14 | — | ~60 s | **115 s** |
+| CI cells green | 9/9 | 9/9 | **9/9** |
+
+Suite time grew with the day-22 referee and the day-23 campaign, which record and
+reconstruct real programs — the cost is the coverage, and the fast Hypothesis profile
+keeps the per-push check at a few seconds.
+
+---
+
 ## Standing budgets
 
 | thing | budget | current | measured |
