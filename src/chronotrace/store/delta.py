@@ -184,6 +184,13 @@ def derive(event: Event, frames: Mapping[int, FrameSnapshot]) -> list[Delta]:
         if frame is None:
             return [Delta(DeltaKind.FRAME_ENTER, seq, fid), bind]  # recording began mid-frame
         return [bind]
+    # Any other event still *introduces* a frame the recorder never saw start (recording
+    # began mid-execution, so its first event is a LINE, not a CALL). `LiveState` creates
+    # it on sight, so the delta stream must enter it too -- otherwise a later BIND has no
+    # frame to bind into and a from-zero replay raises where a from-keyframe one, which
+    # inherits the frame from the snapshot, quietly succeeds.
+    if fid not in frames:
+        return [Delta(DeltaKind.FRAME_ENTER, seq, fid)]
     return []
 
 

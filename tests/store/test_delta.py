@@ -310,3 +310,23 @@ def test_decode_rejects_inconsistent_locals_region() -> None:
     forged = struct.pack("<I", 1) + header + struct.pack("<I", 0) + pack_columns([[], []])
     with pytest.raises(ValueError, match="do not match"):
         decode_deltas(forged)
+
+
+def test_a_frame_first_seen_without_a_call_is_entered_in_the_delta_stream() -> None:
+    """Recording can begin mid-execution, so a frame's first event may be a LINE, not a
+    CALL. `LiveState` creates such a frame on sight, so `derive` must ENTER it in the
+    delta stream too -- otherwise a later BIND has no frame and a from-zero replay raises
+    where a from-keyframe replay (which inherits the frame from the snapshot) succeeds.
+    Found on day 20 by the reconstruction oracle, on a real recording."""
+    frames: dict[int, FrameSnapshot] = {}
+    line = _ev(0, K.LINE, 7, lineno=3)
+    deltas = derive(line, frames)
+    assert [d.kind for d in deltas] == [DeltaKind.FRAME_ENTER]
+
+    # Replaying only the deltas must now leave frame 7 live, so a later bind applies.
+    state: dict[int, dict[int, int]] = {}
+    for d in deltas:
+        state = apply(state, d)
+    assert 7 in state
+    state = apply(state, Delta(DeltaKind.BIND, 1, 7, 5, NO_REF, 42))
+    assert state[7] == {5: 42}
