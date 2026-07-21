@@ -621,6 +621,54 @@ to gate a traced program unacceptably.
 
 ---
 
+## Day 20 — reconstruction latency (`bench_reconstruct.py`)
+
+`reconstruct(seq)` on json_pipeline (280,997 events, 281 keyframes, interval 1,000),
+with tuned storage defaults (ADR-0005).
+
+**The contract holds:** across 400 random targets the deepest replay was **996 events**
+(bound: ≤ 1,000). A p99 far above p50 would have meant a keyframe window wider than the
+interval — a writer cadence bug — so this is the number that validates the invariant, not
+just the speed.
+
+| operation | p50 | p95 | p99 |
+|---|---:|---:|---:|
+| **cached +1 step (a playhead drag)** | **119 µs** | 180 µs | 941 µs |
+| random jump, uncached (cold) | 18.1 ms | 37.8 ms | 98.9 ms |
+| oracle at seq 140,498 — O(seq) | 860 ms | | |
+
+The oracle is **48× the fast path** at the midpoint and grows with `seq` while the fast
+path does not: that gap *is* the keyframe+delta design, measured.
+
+**A 31× win from measuring:** the cached step first came in at **3,712 µs**. Profiling
+said `deltas_between` re-decoded its whole DELTAS block on every call — EVENTS blocks had
+an LRU, delta blocks did not. Giving them the same memoisation took the drag to **119 µs**.
+A drag hits one block thousands of times; decoding it per step was the entire cost.
+
+Cold random jumps stay block-decode-bound (ADR-0005: ~2.1 µs/event decoded, and a jump
+touches an EVENTS *and* a DELTAS block), which is why the scrubber leans on the cache.
+
+**Value resolution is lazy and cheap:** 238 µs cold (one pool lookup + msgpack decode),
+**0.29 µs** cached. A frame with 50 locals where the user looks at 2 pays for 2.
+
+### What the oracle caught (the case for writing the slow one first)
+
+Within an hour of existing, `reconstruct_slow` found three real defects the fast path
+alone would have shipped:
+
+1. **`parent_id` was path-dependent** — known from a keyframe only if the frame entered
+   after it. Removed from `ProgramState` (ADR-0006 amendment); the call tree is the
+   day-27 index's job.
+2. **An in-flight exception spanning a keyframe was lost** — the keyframe did not record
+   it, so the same instant showed an exception when replayed from zero and none when
+   started from that keyframe. Fixed in the format (**1.4**).
+3. **A latent day-16 delta bug** — `derive` emitted an implicit `FRAME_ENTER` only for
+   `VAR_WRITE`, but `LiveState` creates a frame on *any* event, so a frame first seen via
+   a `LINE` (recording began mid-execution) had no ENTER delta and a later BIND raised.
+   Only the from-zero path hit it; the keyframe path inherited the frame and hid it.
+
+---
+
 ## Standing budgets
 
 | thing | budget | current | measured |
