@@ -32,6 +32,7 @@ def _ev(
     code: int = 1,
     name: int | None = None,
     ref: int | None = None,
+    exc: int | None = None,
 ) -> Event:
     return Event(
         seq=seq,
@@ -43,6 +44,7 @@ def _ev(
         lineno=lineno,
         name_id=name,
         value_ref=None if ref is None else ValueRef(ref),
+        exc_type_id=exc,
     )
 
 
@@ -217,14 +219,14 @@ def test_a_stack_deeper_than_policy_is_truncated_and_flagged() -> None:
 
 
 def test_decode_rejects_a_huge_frame_count() -> None:
-    forged = struct.pack("<B I", 0, MAX_FRAMES_PER_KEYFRAME + 1)
+    forged = struct.pack("<B I I Q", 0, MAX_FRAMES_PER_KEYFRAME + 1, 0, 0)
     with pytest.raises(ValueError, match="over the cap"):
         decode_keyframe(forged, seq=0)
 
 
 def test_decode_rejects_a_frame_with_too_many_locals() -> None:
     # one frame declaring local_count over the cap
-    forged = struct.pack("<B I", 0, 1) + struct.pack(
+    forged = struct.pack("<B I I Q", 0, 1, 0, 0) + struct.pack(
         "<Q I I B I", 1, 1, 1, 0, MAX_LOCALS_PER_FRAME + 1
     )
     with pytest.raises(ValueError, match="over the cap"):
@@ -233,7 +235,7 @@ def test_decode_rejects_a_frame_with_too_many_locals() -> None:
 
 def test_decode_rejects_locals_that_overrun_the_block() -> None:
     # one frame claiming 100 locals but carrying no local bytes
-    forged = struct.pack("<B I", 0, 1) + struct.pack("<Q I I B I", 1, 1, 1, 0, 100)
+    forged = struct.pack("<B I I Q", 0, 1, 0, 0) + struct.pack("<Q I I B I", 1, 1, 1, 0, 100)
     with pytest.raises(ValueError, match="overrun"):
         decode_keyframe(forged, seq=0)
 
@@ -255,3 +257,17 @@ def test_a_corrupt_keyframe_degrades_to_the_previous_one() -> None:
     reader = ChronoReader.from_bytes(bytes(data))
     kf = reader.nearest_keyframe_at_or_before(34)  # would pick seq 30, which is now torn
     assert kf is not None and kf.seq == 20, "fell back to the previous intact keyframe"
+
+
+def test_an_in_flight_exception_round_trips_through_a_keyframe() -> None:
+    """A keyframe must record an exception still propagating at its instant, or
+    reconstruction becomes path-dependent: reaching the instant from this keyframe would
+    show no exception while replaying from the start would show one (day 20)."""
+    live = LiveState()
+    live.apply(_ev(0, K.CALL, 1, lineno=1))
+    live.apply(_ev(1, K.RAISE, 1, lineno=2, exc=7))
+    kf = decode_keyframe(live.encode(), seq=1)
+    assert kf.exception == (7, 1)  # (exc_type_id, raised_at_seq)
+
+    live.apply(_ev(2, K.EXCEPTION_HANDLED, 1, lineno=3, exc=7))
+    assert decode_keyframe(live.encode(), seq=2).exception is None  # handled: no longer in flight

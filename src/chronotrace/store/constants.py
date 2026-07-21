@@ -51,7 +51,7 @@ FORMAT_VERSION_MAJOR = 1
 """Incompatible-change counter. A reader MUST refuse a file whose major exceeds
 its own -- the layout may have changed in ways it cannot parse."""
 
-FORMAT_VERSION_MINOR = 3
+FORMAT_VERSION_MINOR = 4
 """Backward-compatible-addition counter. A reader MAY open a file with a higher
 minor than its own: new *optional* blocks are skippable and new header fields live
 past `header_size`. It MUST NOT guess at anything it does not recognise.
@@ -62,6 +62,12 @@ past `header_size`. It MUST NOT guess at anything it does not recognise.
 * 3 (day 16) added the optional `DELTAS` block: invertible state transitions between
   keyframes. Optional again, so a reader that predates it skips the block and can
   still reconstruct forward from the events -- a minor bump, not a major.
+* 4 (day 20) added the in-flight exception to the KEYFRAMES payload. Building the
+  reconstructor proved the omission made reconstruction *path-dependent* -- an
+  exception still propagating across a keyframe was visible when replaying from the
+  start but not when starting from that keyframe -- and state must be a pure function
+  of `seq`. The payload grew, so a reader that predates it must not parse a 1.4
+  KEYFRAMES block; being optional, it simply skips it.
 
 A current reader reads every earlier file unchanged; an older reader opening a newer
 file skips the optional blocks it does not know and loses only fast seek, not data."""

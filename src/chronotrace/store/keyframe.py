@@ -39,7 +39,8 @@ stack (get this wrong and reconstruction silently loses a generator's variables)
 On-disk layout of a KEYFRAMES block payload (spec §6.6)
 ------------------------------------------------------
 `[u64 seq]` uncompressed (so the reader peeks it without decompressing), then the
-compression frame over `[u8 kf_flags][u32 frame_count]` and, per frame,
+compression frame over `[u8 kf_flags][u32 frame_count][u32 exc_type_id][u64 exc_seq]`
+and, per frame,
 `[u64 frame_id][u32 code_id][u32 lineno][u8 frame_flags][u32 local_count]` followed
 by `local_count x [u32 name_id][u32 value_ref]`.
 """
@@ -76,13 +77,14 @@ KF_SEQ = struct.Struct("<Q")
 which instant a block snapshots without decompressing it (the seq index)."""
 KF_SEQ_SIZE = KF_SEQ.size
 
-_KF_HEADER = struct.Struct("<B I")  # kf_flags, frame_count
+_KF_HEADER = struct.Struct("<B I I Q")  # kf_flags, frame_count, exc_type_id, exc_seq
 _FRAME = struct.Struct("<Q I I B I")  # frame_id, code_id, lineno, frame_flags, local_count
 _LOCAL = struct.Struct("<I I")  # name_id, value_ref
 
 _SUSPENDED = 0x01  # frame_flags: the frame is a suspended generator/coroutine
 _LOCALS_TRUNCATED = 0x02  # frame_flags: locals were capped at MAX_LOCALS_PER_FRAME
 _FRAMES_TRUNCATED = 0x01  # kf_flags: frames were capped at MAX_FRAMES_PER_KEYFRAME
+_HAS_EXCEPTION = 0x02  # kf_flags: an exception was in flight at this instant
 
 
 @dataclass(slots=True)
@@ -104,6 +106,13 @@ class Keyframe:
     seq: int
     frames: list[FrameSnapshot]
     truncated: bool = False  # frames were dropped (a stack deeper than policy allows)
+    exception: tuple[int, int] | None = None
+    """`(exc_type_id, raised_at_seq)` if an exception was in flight at this instant.
+
+    Recorded because an exception can still be propagating when a keyframe lands, and a
+    keyframe that omitted it would make reconstruction *path-dependent*: reaching the
+    instant from this keyframe would show no exception while replaying from the start
+    would show one. State must be a pure function of `seq`."""
 
 
 class LiveState:
@@ -116,10 +125,11 @@ class LiveState:
     keyframe payload. O(1) per event; O(live frames x locals) per snapshot.
     """
 
-    __slots__ = ("_frames",)
+    __slots__ = ("_exception", "_frames")
 
     def __init__(self) -> None:
         self._frames: dict[int, FrameSnapshot] = {}
+        self._exception: tuple[int, int] | None = None
 
     def apply(self, event: Event) -> None:
         """Fold one event into the live state. Must be called in `seq` order."""
@@ -127,6 +137,10 @@ class LiveState:
         if kind == EventKind.CALL:
             self._frames[fid] = FrameSnapshot(fid, event.code_id, event.lineno, False, {})
             return
+        if kind == EventKind.RAISE and event.exc_type_id is not None:
+            self._exception = (event.exc_type_id, event.seq)  # in flight until handled
+        elif kind == EventKind.EXCEPTION_HANDLED:
+            self._exception = None
         if kind in (EventKind.RETURN, EventKind.UNWIND):
             self._frames.pop(fid, None)  # frame is gone; YIELD does NOT reach here
             return
@@ -151,7 +165,10 @@ class LiveState:
         if len(frames) > MAX_FRAMES_PER_KEYFRAME:
             frames = frames[-MAX_FRAMES_PER_KEYFRAME:]  # keep the innermost; flag the loss
             kf_flags = _FRAMES_TRUNCATED
-        out = bytearray(_KF_HEADER.pack(kf_flags, len(frames)))
+        exc_type, exc_seq = self._exception if self._exception is not None else (0, 0)
+        if self._exception is not None:
+            kf_flags |= _HAS_EXCEPTION
+        out = bytearray(_KF_HEADER.pack(kf_flags, len(frames), exc_type, exc_seq))
         for f in frames:
             out += _encode_frame(f)
         return bytes(out)
@@ -205,7 +222,7 @@ def decode_keyframe(payload: bytes, seq: int) -> Keyframe:
         ValueError: a frame or local count exceeds its cap.
         struct.error: the payload is too short for a header it declares.
     """
-    kf_flags, frame_count = _KF_HEADER.unpack_from(payload, 0)
+    kf_flags, frame_count, exc_type, exc_seq = _KF_HEADER.unpack_from(payload, 0)
     if frame_count > MAX_FRAMES_PER_KEYFRAME:
         raise ValueError(f"keyframe claims {frame_count} frames, over the cap")
     pos = _KF_HEADER.size
@@ -213,7 +230,8 @@ def decode_keyframe(payload: bytes, seq: int) -> Keyframe:
     for _ in range(frame_count):
         frame, pos = _decode_frame(payload, pos)
         frames.append(frame)
-    return Keyframe(seq, frames, bool(kf_flags & _FRAMES_TRUNCATED))
+    exception = (exc_type, exc_seq) if kf_flags & _HAS_EXCEPTION else None
+    return Keyframe(seq, frames, bool(kf_flags & _FRAMES_TRUNCATED), exception)
 
 
 def _decode_frame(payload: bytes, pos: int) -> tuple[FrameSnapshot, int]:

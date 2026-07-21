@@ -1,6 +1,6 @@
 # The `.chrono` file format — normative specification
 
-**Format version 1.3.** This document defines the on-disk `.chrono` format
+**Format version 1.4.** This document defines the on-disk `.chrono` format
 precisely enough to implement a reader or writer in any language. Where it and the
 code disagree, this document is the contract; `src/chronotrace/store/constants.py`
 is its machine form and `tests/store/test_constants.py` pins the byte layout.
@@ -8,7 +8,8 @@ is its machine form and `tests/store/test_constants.py` pins the byte layout.
 Version history: **1.1** (day 14) activated per-block zstd compression (the
 `COMPRESSED_ZSTD` flag reserved in 1.0) and made the VALUES section real msgpack.
 **1.2** (day 15) added the optional `KEYFRAMES` block ([§6.6](#66-keyframes)):
-periodic snapshots of live state for O(log K) seek. **1.3** (day 16) added the
+periodic snapshots of live state for O(log K) seek. **1.4** (day 20) added the
+in-flight exception to that snapshot. **1.3** (day 16) added the
 optional `DELTAS` block ([§6.7](#67-deltas)): the invertible state transitions
 between keyframes. Each was a backward-compatible addition a current reader handles
 and older files never carry; see [§8 Evolution](#8-evolution).
@@ -58,7 +59,7 @@ that the writer was killed mid-recording; see [§7 Reading](#7-reading).
 |---:|---:|---|---|---|
 | 0 | 11 | bytes | `magic` | `89 43 48 52 4F 4E 4F 0D 0A 1A 0A` (`\x89CHRONO\r\n\x1a\n`) |
 | 11 | 2 | u16 | `version_major` | `1` |
-| 13 | 2 | u16 | `version_minor` | `3` |
+| 13 | 2 | u16 | `version_minor` | `4` |
 | 15 | 8 | u64 | `flags` | feature bitfield ([§8](#8-evolution)); `0` in 1.0 |
 | 23 | 2 | u16 | `header_size` | `32` — offset at which the first block begins |
 | 25 | 7 | — | *reserved* | zero |
@@ -282,13 +283,21 @@ it; events are atomic, so the snapshot is always consistent. Payload:
 
 - `[u64 seq]` — the instant, stored **uncompressed** at the front so a reader peeks
   which keyframe a block is without decompressing it (the keyframe seq index).
-- then the compression frame (§4) over: `[u8 kf_flags][u32 frame_count]`, and per
+- then the compression frame (§4) over:
+  `[u8 kf_flags][u32 frame_count][u32 exc_type_id][u64 exc_raised_seq]`, and per
   frame `[u64 frame_id][u32 code_id][u32 lineno][u8 frame_flags][u32 local_count]`
   followed by `local_count × ([u32 name_id][u32 value_ref])`.
 
-`kf_flags` bit 0 = frames truncated (a stack deeper than policy); `frame_flags` bit 0
-= the frame is a suspended generator/coroutine (still live — its locals are still
-state), bit 1 = its locals were truncated. **Locals are stored as `value_ref`s, never
+`kf_flags` bit 0 = frames truncated (a stack deeper than policy); bit 1 = an exception
+was **in flight** at this instant, in which case `exc_type_id`/`exc_raised_seq` describe
+it (they are zero and meaningless otherwise). Recording the in-flight exception is
+required, not optional detail: an exception can still be propagating when a keyframe
+lands, and a keyframe that omitted it would make reconstruction *path-dependent* --
+reaching the instant from that keyframe would show no exception while replaying from the
+start would show one. Program state must be a pure function of `seq`.
+
+`frame_flags` bit 0 = the frame is a suspended generator/coroutine (still live — its
+locals are still state), bit 1 = its locals were truncated. **Locals are stored as `value_ref`s, never
 values** — the value pool (§6.4) already holds the values, so a keyframe is a few ints
 per frame and costs almost nothing beyond the refs it cites. A reader MUST bound
 `frame_count` and each `local_count` before walking them. A keyframe whose block fails
@@ -401,7 +410,10 @@ values were added by activating a reserved block flag and filling in two payload
 encodings, then bumping the minor. No framing changed. **1.2 (day 15)** added
 keyframes by activating the reserved optional `KEYFRAMES` block type and bumping the
 minor again — and because that block is *optional*, a 1.1 reader that predates
-keyframes skips it and still reads every event, losing only fast seek. **1.3 (day 16)**
+keyframes skips it and still reads every event, losing only fast seek. **1.4 (day 20)**
+grew the KEYFRAMES payload to carry the in-flight exception -- found while building the
+reconstructor, which proved the omission made state path-dependent; the block is optional,
+so an older reader skips it rather than misparsing it. **1.3 (day 16)**
 added the optional `DELTAS` block the same way. Every change was disciplined exactly as
 this section requires: a reserved slot and a minor bump, never a silent reinterpretation
 of existing bytes.
@@ -457,7 +469,7 @@ that fsynced every block would have that trade backwards.
 and pinned byte-for-byte by `tests/store/test_writer.py`:
 
 ```
-0000  89 43 48 52 4f 4e 4f 0d 0a 1a 0a 01 00 03 00 00   .CHRONO.........
+0000  89 43 48 52 4f 4e 4f 0d 0a 1a 0a 01 00 04 00 00   .CHRONO.........
 0010  00 00 00 00 00 00 00 20 00 00 00 00 00 00 00 00   ....... ........
 0020  01 00 00 00 01 00 00 00 ad 6c ba 3f 80 0e 00 00   .........l.?....
 0030  00 05 00 00 00 94 9b ef a6 01 00 20 00 00 00 00   ........... ....
@@ -466,7 +478,7 @@ and pinned byte-for-byte by `tests/store/test_writer.py`:
 0060  48 52 4f 4e 45 4e 44                              HRONEND
 ```
 
-Reading it: `magic` at `0x00`; `version_major=1` at `0x0B`, `version_minor=3` at
+Reading it: `magic` at `0x00`; `version_major=1` at `0x0B`, `version_minor=4` at
 `0x0D`; `header_size=32` (`0x20`) at `0x17`. The META frame at `0x20` —
 `payload_length=1`, `type=0x0001`, `crc32=3fba6cad`, payload `80` (an empty msgpack
 map; too small to compress, so it is stored uncompressed with no flag). The INDEX

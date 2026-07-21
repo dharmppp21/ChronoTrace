@@ -173,6 +173,40 @@ ground-truth `ProgramState`. So:
 If (1)–(3) hold, reconstruction is not merely self-consistent — it matches what actually
 happened. Built day 22.
 
+## Amendment (day 20, on implementing this)
+
+Building the fast path and running it against the oracle immediately found **two fields
+that were not a pure function of `seq`** — they depended on *how* the instant was
+reached. That is a correctness bug of the worst kind for a debugger (the same instant
+renders differently depending on how you scrubbed there), and the oracle earned its cost
+in the first hour by catching both.
+
+1. **`parent_id` — removed from `ProgramState`.** A keyframe stores a flat frame set with
+   no call links, so a frame that entered *before* the keyframe had a parent when replayed
+   from zero and `None` when started from the keyframe. Since §1 already named the day-27
+   call-tree index as the *authority* for parents, the honest fix is to stop carrying a
+   field reconstruction cannot fill path-independently. The call tree comes from the index.
+2. **The in-flight exception — added to the keyframe (format 1.4).** Same flaw, but with
+   no other authority: an exception still propagating across a keyframe was visible when
+   replaying from zero and invisible when starting from that keyframe. Nothing else can
+   supply it, and an in-flight exception is genuinely part of live state — so the keyframe
+   now records `(exc_type_id, raised_at_seq)`. A keyframe claims to be "the complete live
+   state at an instant"; it was incomplete.
+
+3. **A latent delta-derivation bug (day 16), on real data.** `derive` emitted an implicit
+   `FRAME_ENTER` only for `VAR_WRITE`, while `LiveState` creates a frame on *any* event —
+   so a frame whose first event was a `LINE` (recording began mid-execution) had no ENTER
+   delta, and a later BIND raised `DeltaError`. Only the from-zero path hit it; the
+   keyframe path inherited the frame from the snapshot and hid it entirely.
+
+The general rule this establishes, worth stating once: **anything in `ProgramState` must
+be reconstructable from the keyframe plus the bounded window, or it does not belong in
+`ProgramState`.** A field that only *some* paths can fill is not state.
+
+The measured outcome (benchmarks/RESULTS.md) also refined the cache: a playhead drag was
+3.7 ms until `deltas_between` was given the same block-level LRU that EVENTS blocks had —
+a drag re-decoded one DELTAS block thousands of times. It is now **119 µs**.
+
 ## Consequences
 
 **Buys:** the product, at `O(log K + I)` — a binary search plus a bounded loop,
