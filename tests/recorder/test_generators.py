@@ -114,14 +114,35 @@ def test_async_gather_interleaves_and_stays_coherent() -> None:
 
 
 def test_registry_is_empty_after_a_recording() -> None:
-    """The debugging checklist's first line: a non-empty registry means a missing exit path."""
+    """The debugging checklist's first line: a non-empty registry means a missing exit path.
+
+    Every shape `generators.main()` exercises, except -- below 3.13 -- the abandoned one.
+    CPython < 3.13 emits no `PY_UNWIND` when the collector finalises an abandoned
+    generator (see `test_abandoned_generator_still_dies`' xfail), so that frame is
+    unobservably dead and the registry keeps it. Worse, *whether* it is still held when
+    `live_count` is read depends on when the collector ran: this asserted `== 0` over
+    `main()` for weeks and passed by luck, alternating 1/0/1/0 between consecutive
+    recordings in one process, until an unrelated test changed the parity.
+
+    So the one shape the interpreter cannot report is excluded on the interpreter that
+    cannot report it, and the invariant stays **exact** everywhere rather than being
+    weakened to `<= 1` on every platform to accommodate one. Tracked as issue #4.
+    """
     sys.path.insert(0, str(EXAMPLES))
     try:
         import generators  # type: ignore[import-not-found]
 
+        workloads = [
+            generators.pipeline,
+            generators.interleaved_generators,
+            generators.async_gather,
+        ]
+        if sys.version_info >= (3, 13):
+            workloads.append(generators.abandoned_generator)
         rec = Recorder(MemorySink(), scope=OnlyThisFile(generators.__file__))
         with rec:
-            generators.main()
+            for workload in workloads:
+                workload()
         assert rec._frames.live_count == 0, "frames left alive: an exit path is missing"
     finally:
         sys.path.remove(str(EXAMPLES))
