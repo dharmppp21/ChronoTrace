@@ -39,6 +39,15 @@ why a permanently slow function is an asset, not debt.
 from chronotrace.reconstruct.oracle import reconstruct_slow
 from chronotrace.reconstruct.reconstructor import KeyframeReconstructor
 from chronotrace.reconstruct.resolve import MissingValue, ValueResolver
+from chronotrace.reconstruct.stepping import (
+    Direction,
+    Edge,
+    StepResult,
+    seek,
+    step,
+    step_out,
+    step_over,
+)
 from chronotrace.reconstruct.types import (
     ExceptionState,
     FrameState,
@@ -47,12 +56,19 @@ from chronotrace.reconstruct.types import (
 )
 
 __all__ = [
+    "Direction",
+    "Edge",
     "ExceptionState",
     "FrameState",
     "KeyframeReconstructor",
     "MissingValue",
     "ProgramState",
     "Reconstructor",
+    "StepResult",
     "ValueResolver",
     "reconstruct_slow",
+    "seek",
+    "step",
+    "step_out",
+    "step_over",
 ]
