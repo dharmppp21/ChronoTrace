@@ -307,13 +307,21 @@ class Recorder:
         bounded, dedup collapses the repeats to one reference, and an unchanged
         reference emits nothing. Day 3 measured the naive always-emit version at
         **2,370x** on json_pipeline; this is the fix.
+
+        Reconciliation runs both ways: names whose value changed are emitted, and names
+        that have *gone* are emitted as a valueless VAR_WRITE. Tracking the live name ids
+        to see the second costs one set per line -- measured at +3.7% of recording time,
+        against `capture()`, which dominates it.
         """
         frame = sys._getframe(2)
         last = self._last_ref.get(frame_id)
         if last is None:
             last = self._last_ref[frame_id] = {}
-        for name, value in frame.f_locals.items():
+        live = frame.f_locals
+        present: set[int] = set()
+        for name, value in live.items():
             name_id = self._names.intern(name)
+            present.add(name_id)
             # Redaction is a *read* gate: a secret-named local never reaches
             # capture(), so its value is never copied into our buffers. The name
             # is still recorded; only the value becomes a marker.
@@ -328,6 +336,14 @@ class Recorder:
             self._emit(
                 EventKind.VAR_WRITE, code, frame_id, line_number, name_id=name_id, value_ref=ref
             )
+        # A binding that has *vanished* since the last line was deleted (`del x`), and a
+        # deleted name simply leaves `f_locals` -- so nothing notices unless we look for
+        # the absence. Without this the debugger keeps showing `x` for the rest of the
+        # frame, which is a lie about the program rather than a lossy view of it (#7).
+        # The materialised list is required: the loop mutates `last`.
+        for name_id in [n for n in last if n not in present]:
+            del last[name_id]
+            self._emit(EventKind.VAR_WRITE, code, frame_id, line_number, name_id=name_id)
 
     def _on_start(self, code: CodeType, instruction_offset: int) -> Any:
         try:

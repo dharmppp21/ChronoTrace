@@ -115,6 +115,24 @@ class Keyframe:
     would show one. State must be a pure function of `seq`."""
 
 
+def binding_change(event: Event) -> tuple[int, int | None] | None:
+    """What this event does to a frame's bindings: `(name_id, new_ref)`, or None.
+
+    `new_ref is None` means the binding was **removed** -- `del x`, which the recorder
+    emits as a `VAR_WRITE` carrying no value.
+
+    The single authority on that rule, and it has to be, because two things consume it:
+    `LiveState.apply` (which builds keyframes) and `delta.derive` (which builds the delta
+    stream). Those are the two halves of the codec, and if they ever disagreed about
+    whether an event binds, a keyframe would claim one state and replaying the deltas
+    would produce another -- a divergence the day-22 referee would catch and nobody could
+    locate, because both sides would look locally correct.
+    """
+    if event.kind != EventKind.VAR_WRITE or event.name_id is None:
+        return None
+    return event.name_id, event.value_ref
+
+
 class LiveState:
     """The running projection of live program state, so the writer can snapshot it.
 
@@ -145,12 +163,13 @@ class LiveState:
             self._frames.pop(fid, None)  # frame is gone; YIELD does NOT reach here
             return
         frame = self._ensure(fid, event)
-        if (
-            kind == EventKind.VAR_WRITE
-            and event.name_id is not None
-            and event.value_ref is not None
-        ):
-            frame.local_refs[event.name_id] = event.value_ref
+        change = binding_change(event)
+        if change is not None:
+            name_id, new_ref = change
+            if new_ref is None:
+                frame.local_refs.pop(name_id, None)  # `del x`
+            else:
+                frame.local_refs[name_id] = new_ref
         elif kind == EventKind.YIELD:
             frame.suspended = True
         elif kind == EventKind.RESUME:

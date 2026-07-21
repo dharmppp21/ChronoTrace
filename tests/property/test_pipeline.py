@@ -34,7 +34,7 @@ from hypothesis import strategies as st
 
 from chronotrace.recorder.scope import Scope
 from chronotrace.store import ChronoReader, Delta
-from tests.equivalence import Mismatch, check
+from tests.equivalence import check
 
 from . import load_generated
 from .program_gen import python_program
@@ -45,17 +45,6 @@ pytestmark = pytest.mark.filterwarnings("ignore::SyntaxWarning")
 
 KEYFRAME_INTERVALS = st.integers(1, 16)
 BLOCK_SIZES = st.integers(2, 32)
-
-
-def _unexplained(found: list[Mismatch], source: str) -> list[Mismatch]:
-    """Mismatches minus the one divergence that is known, tracked and expected.
-
-    Issue #7: the recorder cannot see `del x`, so a deleted local stays bound in
-    reconstruction. Filtered only where the program actually deletes that name, so this
-    cannot quietly absorb an unrelated `extra`. Deleting the filter is how day 24 will
-    know the fix worked.
-    """
-    return [m for m in found if not (m.kind == "extra" and f"del {m.name}" in source)]
 
 
 @pytest.fixture(scope="module")
@@ -81,8 +70,7 @@ def test_reconstruction_equals_reality_for_generated_programs(
         keyframe_interval=interval,
         block_events=block,
     )
-    unexplained = _unexplained(found, source)
-    assert not unexplained, source + "".join(str(m) for m in unexplained)
+    assert not found, source + "".join(str(m) for m in found)
 
 
 def test_the_campaign_catches_an_injected_bug(
@@ -111,7 +99,7 @@ def test_the_campaign_catches_an_injected_bug(
         except Exception:
             caught += 1
             continue
-        caught += bool(_unexplained(found, source))
+        caught += bool(found)
     assert caught, "25 generated programs failed to notice a dropped delta"
 
 

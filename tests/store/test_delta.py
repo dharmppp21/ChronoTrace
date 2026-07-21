@@ -171,6 +171,44 @@ def test_a_write_is_attributed_to_the_events_frame_including_an_enclosing_one() 
     assert delta.frame_id == 2 and delta.old_ref == 100 and delta.new_ref == 200
 
 
+def test_a_var_write_with_no_value_is_a_deletion() -> None:
+    """`del x` on the wire: a VAR_WRITE carrying no `value_ref` (issue #7).
+
+    It needs no new delta kind and no layout change, because `NO_REF` is already how a
+    BIND spells a deletion and the column already held `-1` for events with no value.
+    `old_ref` still carries the value being removed, so the delta stays invertible --
+    stepping backward over a `del` has to put the binding back.
+    """
+    frames = {4: FrameSnapshot(4, 1, 1, False, {7: 99})}
+    deleted = _ev(5, K.VAR_WRITE, 4, name=7, ref=None)
+    (delta,) = derive(deleted, frames)
+    assert (delta.kind, delta.old_ref, delta.new_ref) == (DeltaKind.BIND, 99, NO_REF)
+    assert apply({4: {7: 99}}, delta) == {4: {}}
+    assert invert(apply({4: {7: 99}}, delta), delta) == {4: {7: 99}}
+
+
+def test_the_writer_and_the_delta_stream_agree_about_a_deletion() -> None:
+    """`LiveState` (which builds keyframes) and `derive` (which builds deltas) are the two
+    halves of the codec, and both read the *same* rule from `binding_change`.
+
+    If they ever disagreed about whether an event binds, a keyframe would claim one state
+    and replaying the deltas would produce another. That divergence is why the rule lives
+    in one function rather than being written out twice.
+    """
+    live = LiveState()
+    state: State = {}
+    for event in (
+        _ev(0, K.CALL, 4),
+        _ev(1, K.VAR_WRITE, 4, name=7, ref=99),
+        _ev(2, K.VAR_WRITE, 4, name=7, ref=None),
+    ):
+        for delta in derive(event, live.frames):
+            state = apply(state, delta)
+        live.apply(event)
+    assert state == {4: {}}
+    assert live.frames[4].local_refs == {}
+
+
 def test_a_write_to_a_frame_seen_first_mid_recording_gets_an_implicit_enter() -> None:
     """Recording can begin mid-execution, so a frame's first event may be a bind, not a
     call. derive must precede that bind with a frame-enter, or applying the delta stream

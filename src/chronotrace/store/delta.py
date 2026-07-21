@@ -50,7 +50,7 @@ from typing import Final
 
 from chronotrace.recorder.events import Event, EventKind
 from chronotrace.store.columnar import pack_columns, unpack_columns
-from chronotrace.store.keyframe import FrameSnapshot, Keyframe
+from chronotrace.store.keyframe import FrameSnapshot, Keyframe, binding_change
 
 NO_REF: Final = -1
 """Sentinel for "no binding": a created binding's `old_ref`, a deleted binding's
@@ -177,10 +177,15 @@ def derive(event: Event, frames: Mapping[int, FrameSnapshot]) -> list[Delta]:
         if frame is None:
             return []  # a frame we never saw live: nothing to retire
         return [Delta(DeltaKind.FRAME_EXIT, seq, fid, frame_locals=tuple(frame.local_refs.items()))]
-    if kind == EventKind.VAR_WRITE and event.name_id is not None and event.value_ref is not None:
+    change = binding_change(event)
+    if change is not None:
+        name_id, new_ref = change
         frame = frames.get(fid)
-        old = NO_REF if frame is None else frame.local_refs.get(event.name_id, NO_REF)
-        bind = Delta(DeltaKind.BIND, seq, fid, event.name_id, old, event.value_ref)
+        old = NO_REF if frame is None else frame.local_refs.get(name_id, NO_REF)
+        # `new_ref is None` is a deletion, and `NO_REF` is exactly how a BIND spells one --
+        # so `del x` needs no new delta kind and no format change. `apply` already pops on
+        # NO_REF, and `inverse` of a creation already *produces* one.
+        bind = Delta(DeltaKind.BIND, seq, fid, name_id, old, NO_REF if new_ref is None else new_ref)
         if frame is None:
             return [Delta(DeltaKind.FRAME_ENTER, seq, fid), bind]  # recording began mid-frame
         return [bind]

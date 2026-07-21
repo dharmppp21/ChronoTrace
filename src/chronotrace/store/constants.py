@@ -51,7 +51,7 @@ FORMAT_VERSION_MAJOR = 1
 """Incompatible-change counter. A reader MUST refuse a file whose major exceeds
 its own -- the layout may have changed in ways it cannot parse."""
 
-FORMAT_VERSION_MINOR = 4
+FORMAT_VERSION_MINOR = 5
 """Backward-compatible-addition counter. A reader MAY open a file with a higher
 minor than its own: new *optional* blocks are skippable and new header fields live
 past `header_size`. It MUST NOT guess at anything it does not recognise.
@@ -68,6 +68,13 @@ past `header_size`. It MUST NOT guess at anything it does not recognise.
   start but not when starting from that keyframe -- and state must be a pure function
   of `seq`. The payload grew, so a reader that predates it must not parse a 1.4
   KEYFRAMES block; being optional, it simply skips it.
+* 5 (day 24) gave `VAR_WRITE` a **second meaning**: carrying no `value_ref` (encoded
+  as the existing `-1` sentinel) means the binding was *removed*, i.e. `del x`. No
+  layout changed -- the column already held `-1` for events with no value -- so this
+  is purely a semantic bump. An older reader decodes the event fine and simply keeps
+  the dead binding alive, which is the bug (#7) this fixes; a current reader deletes
+  it. Recorded as a version because the *meaning* of existing bytes changed, which is
+  exactly the kind of drift a spec exists to pin down.
 
 A current reader reads every earlier file unchanged; an older reader opening a newer
 file skips the optional blocks it does not know and loses only fast seek, not data."""

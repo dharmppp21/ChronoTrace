@@ -27,8 +27,8 @@ from chronotrace.store import ChronoReader
 from chronotrace.store.writer import ChronoWriter
 from tests.fixtures import hostile, programs
 
-from . import Mismatch, check, record
-from .minimise import harness_oracle, minimise
+from . import check, record
+from .minimise import harness_oracle, load_program, minimise
 from .truth import TruthObserver
 
 EXAMPLES = Path(__file__).parent.parent.parent / "examples"
@@ -38,14 +38,13 @@ FIXTURE_SCOPE = Scope(roots=[str(FIXTURES)])
 
 PROGRAMS = ["simple", "generators", "exceptions", "buggy_pipeline", "pipeline_realistic"]
 
-KNOWN_DIVERGENCES: dict[str, list[tuple[str, str]]] = {
-    # Issue #7, found by this harness on its first run: `del x` leaves no trace in
-    # `f_locals`, so the recorder never emits anything and reconstruction carries the
-    # dead binding forward forever. Listed as an exact expectation rather than forgiven
-    # in the comparator -- when the recorder learns about deletion this assertion fails
-    # and the entry gets deleted, which is the point.
-    "generators": [("extra", "gen")],
-}
+KNOWN_DIVERGENCES: dict[str, list[tuple[str, str]]] = {}
+"""Empty, and worth keeping empty.
+
+It held one entry for two days -- issue #7, `del x` leaving a dead binding alive in
+reconstruction, which this harness found on its first run. Day 24 fixed the recorder and
+the entry came out, which is exactly the lifecycle a strict expectation is for: it failed
+the moment the divergence stopped, instead of quietly forgiving it forever."""
 
 
 def _load(module: str) -> Any:
@@ -78,6 +77,26 @@ def test_hostile_objects_reconstruct_faithfully() -> None:
     zoo = hostile.build_zoo()
     found = check(lambda: programs.holds_the_zoo(zoo), FIXTURE_SCOPE)
     assert found == [], "".join(str(m) for m in found)
+
+
+def test_a_deleted_local_stops_being_reconstructed() -> None:
+    """Issue #7, end to end: `del x` must remove the binding, not leave it alive.
+
+    The regression test for the first defect this harness ever found. It sat as a known
+    divergence for two days; day 24 taught the recorder to notice an absence, and the
+    referee -- which never loosened to accommodate it -- now simply passes.
+    """
+    assert check(programs.deletes_a_local, FIXTURE_SCOPE) == []
+    recording = record(programs.deletes_a_local, FIXTURE_SCOPE)
+    after_delete = [
+        state
+        for seq, observation in recording.instants
+        if "doomed" not in observation.bindings
+        for state in [KeyframeReconstructor(recording.reader).reconstruct(seq)]
+    ]
+    assert after_delete, "the fixture must actually delete a local"
+    names = {recording.names[n] for s in after_delete for f in s.frames for n in f.bindings}
+    assert "doomed" not in names, "a deleted local survived into the reconstructed state"
 
 
 def test_a_redacted_secret_is_withheld_on_both_sides() -> None:
@@ -222,12 +241,22 @@ def test_sampling_keeps_every_boundary() -> None:
     assert {(m.kind, m.name) for m in sampled} == {(m.kind, m.name) for m in full}
 
 
-def test_minimisation_shrinks_a_real_failure(tmp_path: Path) -> None:
+def test_minimisation_shrinks_a_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The `del` divergence, reduced from a padded program to a handful of lines.
 
-    Uses a genuine failure rather than a synthetic one: minimisation that only works on
-    a bug you invented for it is not a debugging tool.
+    Driven by an **injected** bug rather than a real one, and that is a change from day 22.
+    It used to shrink issue #7's `del` divergence, which was a genuine failure right up
+    until day 24 fixed it -- and then this test failed, correctly, because there was
+    nothing left to shrink. A minimiser has to keep working when the product does not
+    happen to be broken, so the failure it reduces is now one the test creates.
     """
+    original = ChronoReader.deltas_between
+
+    def lossy(self: ChronoReader, a: int, b: int) -> list[Any]:
+        deltas = original(self, a, b)
+        return deltas[:-1] if len(deltas) > 1 else deltas
+
+    monkeypatch.setattr(ChronoReader, "deltas_between", lossy)
     source = (
         "def helper(n):\n"
         "    total = 0\n"
@@ -239,17 +268,20 @@ def test_minimisation_shrinks_a_real_failure(tmp_path: Path) -> None:
         "    a = 1\n"
         "    b = 2\n"
         "    c = helper(3)\n"
-        "    doomed = [1, 2, 3]\n"
-        "    del doomed\n"
         "    d = a + b\n"
         "    return c + d\n"
     )
-    oracle = harness_oracle(tmp_path, Mismatch(0, "extra", "", "doomed", None, None))
+    entry = load_program(tmp_path, "shrink_me", source, "main")
+    assert entry is not None
+    found = check(entry, Scope(roots=[str(tmp_path)]))
+    assert found, "the injected bug must produce a failure before there is one to shrink"
+
+    oracle = harness_oracle(tmp_path, found[0])
     reduced = minimise(source, oracle)
     lines = [line for line in reduced.splitlines() if line.strip()]
+    assert len(lines) < len(source.splitlines()), f"nothing was removed:\n{reduced}"
     assert len(lines) < 20, reduced
-    assert "del doomed" in reduced, reduced
-    assert "helper" not in reduced, f"unrelated code survived minimisation:\n{reduced}"
+    assert oracle(reduced), "the reduced program must still reproduce the failure"
 
 
 def test_minimisation_refuses_a_failure_it_cannot_reproduce() -> None:

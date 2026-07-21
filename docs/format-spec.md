@@ -1,6 +1,6 @@
 # The `.chrono` file format — normative specification
 
-**Format version 1.4.** This document defines the on-disk `.chrono` format
+**Format version 1.5.** This document defines the on-disk `.chrono` format
 precisely enough to implement a reader or writer in any language. Where it and the
 code disagree, this document is the contract; `src/chronotrace/store/constants.py`
 is its machine form and `tests/store/test_constants.py` pins the byte layout.
@@ -11,7 +11,9 @@ Version history: **1.1** (day 14) activated per-block zstd compression (the
 periodic snapshots of live state for O(log K) seek. **1.4** (day 20) added the
 in-flight exception to that snapshot. **1.3** (day 16) added the
 optional `DELTAS` block ([§6.7](#67-deltas)): the invertible state transitions
-between keyframes. Each was a backward-compatible addition a current reader handles
+between keyframes. **1.5** (day 24) gave `VAR_WRITE` a second meaning: no `value_ref`
+means the binding was *removed* ([§6.3](#63-events)). Each was a backward-compatible
+addition a current reader handles
 and older files never carry; see [§8 Evolution](#8-evolution).
 
 A recording that exists in the wild makes this format a compatibility contract, so
@@ -215,6 +217,14 @@ Payload:
    `seq`, `kind`, `timestamp_ns`, `thread_id`, `frame_id`, `code_id`, `lineno`,
    `name_id`, `value_ref`, `exc_type_id`. `None` is encoded as `-1` (these fields
    are otherwise non-negative).
+
+   **A `VAR_WRITE` whose `value_ref` is `-1` is a deletion** (`del x`), not a write of
+   some null value — the binding named by `name_id` ceased to exist (1.5, day 24). This
+   reuses the existing sentinel rather than adding a field, so no layout changed; a
+   reader predating 1.5 decodes the event and simply keeps the dead binding alive, which
+   is the defect ([#7](https://github.com/dharmppp21/ChronoTrace/issues/7)) the version
+   records. It is a **semantic** bump: the meaning of existing bytes changed, which is
+   the drift a spec exists to pin down.
 3. Each column is: a u8 `codec`, a u32 `byte_length`, then `byte_length` bytes.
 
 When the block is compressed (1.1), the `u32 event_count` stays **uncompressed** at
@@ -315,7 +325,8 @@ because a bind delta stores the **old** ref as well as the new — back again. S
 `seq` S = the nearest keyframe at or before S, plus the deltas from there to S applied;
 one step backward is one delta *inverted*, never a rewind to a keyframe. A DELTAS block
 holds the deltas for a run of events, and the deltas are **derivable from the events**
-forward (bind ← VAR_WRITE, enter ← CALL, exit ← RETURN/UNWIND) — the block adds the
+forward (bind ← VAR_WRITE, enter ← CALL, exit ← RETURN/UNWIND; a `VAR_WRITE` with no
+`value_ref` derives a bind whose **new** ref is `NO_REF`, i.e. a deletion) — the block adds the
 stored old refs (for backward stepping) and saves the derivation, which is why it is
 optional.
 
@@ -414,7 +425,11 @@ keyframes skips it and still reads every event, losing only fast seek. **1.4 (da
 grew the KEYFRAMES payload to carry the in-flight exception -- found while building the
 reconstructor, which proved the omission made state path-dependent; the block is optional,
 so an older reader skips it rather than misparsing it. **1.3 (day 16)**
-added the optional `DELTAS` block the same way. Every change was disciplined exactly as
+added the optional `DELTAS` block the same way. **1.5 (day 24)** is the one change that
+altered no bytes at all: it gave an existing encoding (`value_ref = -1` on a `VAR_WRITE`)
+a second meaning. That is the most dangerous kind of change, because nothing in the file
+looks different — which is exactly why it took a version number. Every change was
+disciplined exactly as
 this section requires: a reserved slot and a minor bump, never a silent reinterpretation
 of existing bytes.
 
