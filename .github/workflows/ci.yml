@@ -62,5 +62,11 @@ jobs:
       - name: Replay equivalence (the referee)
         run: pytest tests/equivalence -q
 
+      # The `ci` profile: 40 examples, a few seconds. Deliberately shallow -- depth lives
+      # in the nightly campaign (.github/workflows/nightly.yml), because a per-push check
+      # that takes twenty minutes to report a failure is one people learn to ignore.
+      - name: Property campaign (fast profile)
+        run: pytest tests/property --hypothesis-profile=ci -q
+
       - name: Tests
         run: pytest

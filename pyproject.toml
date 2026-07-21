@@ -200,7 +200,11 @@ ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q --strict-markers --strict-config"
+# `dev` is the local default: 100 examples, a few seconds. CI overrides it with `ci`
+# (fast, per push) and the nightly workflow with `nightly` (3,000 examples). The profiles
+# themselves live in tests/property/conftest.py, because Hypothesis registers them in
+# code -- this only chooses which one an unadorned `pytest` gets.
+addopts = "-q --strict-markers --strict-config --hypothesis-profile=dev"
 
 # ---------------------------------------------------------------------------
 # ChronoTrace's own recording config (documented; see docs/configuration.md)

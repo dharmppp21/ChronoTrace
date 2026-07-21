@@ -1,0 +1,58 @@
+name: Nightly property campaign
+
+# Depth on a different clock from feedback. The `ci` profile runs 40 examples on every
+# push, because a check nobody waits for is a check nobody reads; this runs 3,000, once a
+# day, where a bug that shows up in one program per thousand has room to surface. Nobody
+# is blocked on it, so it can afford to be thorough.
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch: # so a campaign can be run on demand after a risky change
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly
+  cancel-in-progress: true
+
+jobs:
+  campaign:
+    name: campaign / py${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # One OS, every interpreter. The campaign hunts semantic bugs in recording and
+        # reconstruction, which are interpreter-dependent (generators and frame
+        # finalisation differ across 3.12-3.14) and not OS-dependent -- the platform
+        # differences that matter are mmap and CRLF, which the per-push matrix already
+        # covers on all nine cells.
+        python-version: ["3.12", "3.13", "3.14"]
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Campaign
+        run: pytest tests/property --hypothesis-profile=nightly -q
+
+      # A failing example is the whole product of this run. Hypothesis writes it to its
+      # database, so keeping that turns "the nightly went red" into a reproduction the
+      # next `pytest` replays first, rather than a bug nobody can find again.
+      - name: Keep the failing examples
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hypothesis-examples-py${{ matrix.python-version }}
+          path: .hypothesis/examples
+          if-no-files-found: ignore

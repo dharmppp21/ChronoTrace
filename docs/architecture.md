@@ -117,6 +117,14 @@ design, not an afterthought bolted on at test time.
 | unit tests | each piece against hand-written expectations | pieces that are individually right and wrong together |
 | the **oracle** (day 20, `reconstruct/oracle.py`) | the fast reconstruction against a slow, obviously-correct one that ships forever | a *recorder* that misunderstood the program — both paths are then wrong together |
 | the **referee** (day 22, `tests/equivalence/`) | reconstructed state against the state the program actually had, observed live | a bug inside `capture` itself, which both observers share by necessity |
+| the **campaign** (day 23, `tests/property/`) | the referee's verdict over thousands of machine-generated programs | constructs the grammar cannot express (threads, `eval`, `async`) |
+
+The campaign exists because the referee can only judge the programs it is pointed at, and
+those were five examples a human thought to write. A Hypothesis grammar generates valid,
+**terminating and deterministic** Python — bounded structurally rather than by a timeout,
+because a timeout only tells you a program hung. Its storage parameters are drawn too:
+the first clean campaign turned out to average 0.3 keyframes per program, so the keyframe
+and delta machinery was barely under test until `keyframe_interval` became an input.
 
 The referee is the only one that spans all five subsystems at once — recorder, store,
 keyframes, deltas, reconstructor. Its ground truth comes from a **second
