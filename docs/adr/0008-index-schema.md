@@ -239,6 +239,41 @@ looks like with durability off — and the answer to that is a rebuild, not a re
 Durability *is* off (`journal_mode=OFF`, `synchronous=OFF`): paying for it on a cache is
 paying for the wrong thing, and the recording it derives from is untouched either way.
 
+## Amendment (day 26, on building it)
+
+Three corrections, all found by writing the thing rather than by rereading the design.
+
+**1. `codes` stores text, not string ids.** §5 declared
+`codes(code_id, file_id, qualname_id, ...)`, pointing into `strings`. That cannot work as
+written: `strings.id` **is** the recording's `name_id`, because Q8 has to turn typed text
+into the id `var_writes` stores, and `code_id` is a different id space. Sharing one pool
+would need a second mapping table just to keep Q8 a direct lookup.
+
+Interning them buys nothing anyway, and this is where the size argument actually applies:
+`var_writes` has a row per variable write — millions — so storing a 4-byte `name_id`
+instead of a repeated string is the whole game. `codes` has *hundreds* of rows. Interning
+at that scale is ceremony. So `codes(code_id, filename, qualname, first_lineno)`, text
+inline.
+
+**2. `exceptions.type_id` still has nothing to resolve against.** Same id-space problem,
+not yet solved because it has no consumer: the exceptions indexer lands on day 27, and its
+`exc_types` table lands with it. Noted rather than built, so the table does not ship ahead
+of anything that writes to it.
+
+**3. The size estimate was generous.** §6 predicted 14.5 B/event and 3.0× the recording.
+Measured on a real recording with `var_writes` alone: **5.4 B/event, 1.1×**. The estimate
+assumed both large tables; today's index produces a row per *variable write*, not per
+event — 85k rows for 281k events. Day 27's `line_hits` is the bigger table and will push
+the ratio toward the original figure. The 10 GB warning in §6 stands, with more headroom
+than expected.
+
+**And one thing measurement overturned:** the standard "create indexes after bulk load"
+advice does not hold for this schema — 4.49 s after vs 4.31 s before, with the clustered
+`WITHOUT ROWID` form beating both at 3.68 s and half the size. The rows arrive in `seq`
+order across a few hundred names, so every page is hot and maintaining the tree during
+insert is nearly free. `var_writes` therefore ships **no secondary index at all**: the
+primary key is the access path. Numbers in `benchmarks/RESULTS.md`.
+
 ## Consequences
 
 **Buys:** the questions debugging is actually made of, as B-tree lookups instead of

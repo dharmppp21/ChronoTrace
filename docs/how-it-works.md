@@ -227,6 +227,50 @@ is asserted at every stop instant of every example recording.
 
 ---
 
+## 3b. Making the past queryable
+
+Reconstruction answers *"what was the state at instant S?"* — one instant at a time. But
+the questions debugging is actually made of are about the whole timeline:
+
+> *Who last wrote to `total`?*
+
+Answering that by replay is O(events) per question. So after recording finishes, a pass
+over the event stream builds a **SQLite sidecar** (`recording.chrono.idx`) — and that
+question becomes a B-tree seek:
+
+```sql
+SELECT seq, frame_id, value_ref FROM var_writes
+WHERE name_id = ? AND seq < ?
+ORDER BY seq DESC LIMIT 1
+```
+
+**O(log n), measured at 91 µs**, and it does not care whether the variable was written
+twice or a million times. The table is clustered on `(name_id, seq)`, so the rows for one
+name are contiguous *and already in order*: the query is a descending range scan that
+stops at the first row it finds.
+
+Three things about it are worth more than the SQL:
+
+**It stores pointers, not events.** Rows hold `seq` numbers; the events stay in the
+`.chrono`. That is what keeps the index to a few bytes per event instead of a second copy
+of the recording.
+
+**It is derived state and never authoritative.** Every fact comes from the recording, so
+the index can be deleted at any time, rebuilt from the recording alone, and is discarded
+rather than trusted when a stamped fingerprint says the recording changed. That decision
+pays for itself immediately: durability can be turned off during the build (a crash means
+a rebuild, not data loss), which is a large part of why it loads at ~240,000 events/s.
+
+**`frame_id` is on every row, because of recursion.** `total` in one invocation and
+`total` in another are different variables that happen to share a name. Keyed on the name
+alone, "the last write to `total`" would answer with some *other* call's write —
+confidently, and wrongly.
+
+Indexing happens *after* recording, never during: the recorder's hot path is the one thing
+the whole design protects. The honest consequence is that a crash-truncated recording has
+no index — and that is exactly the recording most worth querying — so the first query
+builds one from the recovered prefix. ([ADR-0008](adr/0008-index-schema.md).)
+
 ## 4. Proving it is right
 
 This is the part I would most want a reader to take seriously, because a debugger that

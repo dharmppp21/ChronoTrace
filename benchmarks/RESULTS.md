@@ -785,6 +785,52 @@ keeps the per-push check at a few seconds.
 
 ---
 
+## Day 26 — the variable-write index (`bench_index.py`)
+
+`json_pipeline`, 280,997 events, on the usual machine.
+
+| | measured |
+|---|---:|
+| index build | **1.18 s = 237,542 events/s** |
+| rows produced | 85,221 (one per `VAR_WRITE`, not per event) |
+| index size | 1,515,520 B = **5.4 B/event = 1.1× the recording** |
+| "last write to `x` before `seq`" | **91 µs** |
+
+**ADR-0008 estimated 14.5 B/event and 3.0× the recording; the real number is 1.1×.** The
+estimate assumed `var_writes` *and* `line_hits`; today only the first exists, and it
+produces a row per variable write rather than per event — 85k rows for 281k events. Day
+27 adds `line_hits`, which is the larger table, so the ratio will climb toward the
+estimate. Recorded because an estimate that turned out generous is worth as much as one
+that turned out tight.
+
+### "Create indexes after bulk load" — measured, and it is not true here
+
+2,000,000 synthetic rows over 800 distinct names, identical data, three layouts:
+
+| layout | total | load | index | rate | size | query |
+|---|---:|---:|---:|---:|---:|---:|
+| **`WITHOUT ROWID` (what we ship)** | **3.68 s** | 3.60 | 0.08 | **543k rows/s** | **35.5 MB** | 103 µs |
+| rowid, index **after** load | 4.49 s | 1.92 | 2.56 | 446k rows/s | 67.0 MB | 111 µs |
+| rowid, index **before** load | 4.31 s | 4.12 | 0.18 | 465k rows/s | 71.0 MB | 95 µs |
+
+Two findings, both against expectation:
+
+1. **Building the index after the load is not faster than building it before** (4.49 s vs
+   4.31 s). The advice assumes random key insertion thrashing a B-tree; here the rows
+   arrive in `seq` order across only ~800 distinct names, so every name's page is already
+   hot and maintaining the tree during insert costs almost nothing. Standard advice is a
+   hypothesis, and this workload falsifies it.
+2. **The clustered `WITHOUT ROWID` table beats both anyway** — 1.2× faster than the best
+   rowid variant and **half the size**, at the same query latency. It wins because it
+   stores *one* B-tree instead of a table plus an index, which is the same reason ADR-0008
+   chose it for size.
+
+So the schema ships no secondary index on `var_writes` at all: the primary key **is** the
+access path. `CREATE_INDEX = ""` in `var_writes.py` records that as a decision rather than
+an omission.
+
+---
+
 ## Standing budgets
 
 | thing | budget | current | measured |

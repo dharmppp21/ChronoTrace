@@ -22,11 +22,13 @@ import sys
 from pathlib import Path
 
 from chronotrace.config import RecorderConfig, find_pyproject, load_config
+from chronotrace.index import Progress, build_index
 from chronotrace.recorder import MemorySink, Recorder
 from chronotrace.recorder.redact import Redactor
 from chronotrace.recorder.scope import Scope
 from chronotrace.repl import Repl
-from chronotrace.store import ChronoError, ChronoReader, ChronoWriter, repair
+from chronotrace.store import ChronoError, ChronoReader, ChronoWriter, Strings, repair
+from chronotrace.store.strings import CodeInfo
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -46,12 +48,26 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="record local values, not just control flow (default: on)",
     )
+    rec.add_argument(
+        "--out",
+        metavar="FILE",
+        help="write the recording here (default: <script>.chrono beside the script)",
+    )
+    rec.add_argument(
+        "--index",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="build the query index after recording (default: on)",
+    )
     rec.add_argument("script", help="the Python script to record")
     rec.add_argument("script_args", nargs=argparse.REMAINDER, help="arguments passed to the script")
 
     stp = sub.add_parser("step", help="step through an execution, forward and backward")
     stp.add_argument("target", help="a .py script to record and step, or a .chrono recording")
     stp.add_argument("script_args", nargs=argparse.REMAINDER, help="arguments passed to the script")
+
+    idx = sub.add_parser("index", help="build the query index for a recording")
+    idx.add_argument("file", help="the .chrono file to index")
 
     rep = sub.add_parser("repair", help="rebuild the footer of a crash-truncated recording")
     rep.add_argument("file", help="the .chrono file to repair")
@@ -79,8 +95,8 @@ def record_script(
         sink: where events are written.
 
     Returns:
-        The recorder, for its intern tables and value pool -- the only place `name_id`
-        and `code_id` can currently be resolved back to text (issue #6).
+        The recorder, for its intern tables and value pool -- what `intern_tables` turns
+        into the recording's own STRINGS section.
 
     Complexity: dominated by running the target program.
     """
@@ -131,17 +147,20 @@ def repair_recording(path: str, out: str | None) -> int:
 def step_command(args: argparse.Namespace) -> int:
     """Open a stepping session on a `.chrono` file, or on a script recorded right now.
 
-    Two inputs because they trade off against each other: a `.chrono` on disk is the real
-    artefact but renders raw ids, since the format does not yet persist its intern tables
-    (issue #6); recording the script here keeps the recorder alive, so variables and
-    functions have names. Both drive the identical reader/reconstruct path -- the script
-    form writes a real recording to memory rather than shortcutting past the format.
+    Both forms render real names: since format 1.6 the recording carries its own intern
+    tables, so a `.chrono` opened days later shows exactly what the session that made it
+    would have. Recording the script here still writes a real recording to memory rather
+    than shortcutting past the format, so the demo exercises writer, reader and
+    reconstruction end to end.
     """
     target = Path(args.target)
     if target.suffix == ".chrono":
         try:
             with ChronoReader.open(target) as reader:
-                Repl(reader).run()
+                strings = reader.strings()
+                Repl(
+                    reader, names=dict(enumerate(strings.names)), codes=_code_labels(strings)
+                ).run()
         except ChronoError as exc:
             print(f"chronotrace: cannot read {target}: {exc}", file=sys.stderr)  # noqa: T201
             return 1
@@ -157,8 +176,26 @@ def step_command(args: argparse.Namespace) -> int:
         )
         return 1
     with ChronoReader.from_bytes(_to_chrono(recorder, sink)) as reader:
-        Repl(reader, names=dict(enumerate(recorder.names)), codes=_codes(recorder)).run()
+        strings = reader.strings()
+        Repl(reader, names=dict(enumerate(strings.names)), codes=_code_labels(strings)).run()
     return 0
+
+
+def intern_tables(recorder: Recorder) -> Strings:
+    """The recorder's intern tables as plain data the store can persist.
+
+    Lives here, above both layers, because `store` must not import the recorder's
+    `InternTable` and the recorder must not know a file format exists. The CLI is the
+    only place that legitimately knows about both.
+    """
+    return Strings(
+        names=tuple(recorder.names),
+        exc_types=tuple(recorder.exc_types),
+        codes=tuple(
+            CodeInfo(code.co_filename, code.co_qualname, code.co_firstlineno)
+            for code in recorder.codes
+        ),
+    )
 
 
 def _to_chrono(recorder: Recorder, sink: MemorySink) -> bytes:
@@ -169,6 +206,7 @@ def _to_chrono(recorder: Recorder, sink: MemorySink) -> bytes:
     """
     buf = io.BytesIO()
     writer = ChronoWriter(buf)
+    writer.add_strings(intern_tables(recorder))
     for captured in recorder.values:
         writer.add_value(captured)
     for event in sink.events:
@@ -177,16 +215,47 @@ def _to_chrono(recorder: Recorder, sink: MemorySink) -> bytes:
     return buf.getvalue()
 
 
-def _codes(recorder: Recorder) -> dict[int, str]:
-    """`code_id` -> "qualname (filename)", the shortest text that identifies a frame."""
-    return {
-        i: f"{code.co_qualname} ({Path(code.co_filename).name})"
-        for i, code in enumerate(recorder.codes)
-    }
+def _code_labels(strings: Strings) -> dict[int, str]:
+    """`code_id` -> "qualname (filename)", the shortest text that identifies a frame.
+
+    Reads the *recording's* tables rather than a live recorder, so a `.chrono` opened
+    days later renders exactly what the session that made it would have (format 1.6).
+    """
+    return {i: f"{c.qualname} ({Path(c.filename).name})" for i, c in enumerate(strings.codes)}
+
+
+def index_command(path: str) -> int:
+    """Build the sidecar index for a recording. Returns an exit code.
+
+    Idempotent: an existing index is replaced atomically, so running it twice is safe and
+    running it on a recording that already has a current index simply rebuilds one.
+    """
+    recording = Path(path)
+    try:
+        with ChronoReader.open(recording) as reader:
+            result = build_index(recording, reader, on_progress=_report_progress)
+    except ChronoError as exc:
+        print(f"chronotrace: cannot read {recording}: {exc}", file=sys.stderr)  # noqa: T201
+        return 1
+    partial = " (partial -- the recording is crash-truncated)" if result.partial else ""
+    print(  # noqa: T201
+        f"chronotrace: indexed {result.events:,} events into {result.rows:,} rows "
+        f"-> {result.path}{partial}"
+    )
+    return 0
+
+
+def _report_progress(progress: Progress) -> None:
+    """Report indexing progress on a single rewritten line.
+
+    A large recording is a visible wait, and a wait with no feedback is indistinguishable
+    from a hang -- which is how a tool gets uninstalled.
+    """
+    print(f"\rchronotrace: indexing {progress.fraction:5.0%}", end="", file=sys.stderr)  # noqa: T201
 
 
 def record_command(args: argparse.Namespace) -> int:
-    """Record the target script into an in-memory sink and report the event count."""
+    """Record the target script to a `.chrono` file and index it."""
     config = load_config(
         pyproject=find_pyproject(),
         env=os.environ,
@@ -198,17 +267,20 @@ def record_command(args: argparse.Namespace) -> int:
         },
     )
     sink = MemorySink()
-    record_script(args.script, args.script_args, config, sink)
+    recorder = record_script(args.script, args.script_args, config, sink)
 
     count = len(sink.events)
-    print(f"chronotrace: recorded {count} events from {args.script}")  # noqa: T201
     if count == 0:
         print(  # noqa: T201
             "chronotrace: warning -- nothing was recorded. The scope may exclude "
             "all of your code; try --include.",
             file=sys.stderr,
         )
-    return 0
+        return 0
+    out = Path(args.out) if args.out else Path(args.script).with_suffix(".chrono")
+    out.write_bytes(_to_chrono(recorder, sink))
+    print(f"chronotrace: recorded {count:,} events from {args.script} -> {out}")  # noqa: T201
+    return index_command(str(out)) if args.index else 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -218,6 +290,8 @@ def main(argv: list[str] | None = None) -> int:
         return repair_recording(args.file, args.out)
     if args.command == "step":
         return step_command(args)
+    if args.command == "index":
+        return index_command(args.file)
     return record_command(args)
 
 
