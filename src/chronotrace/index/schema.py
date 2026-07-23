@@ -31,11 +31,14 @@ import hashlib
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 """Bumped whenever the DDL changes. A mismatch discards the index and rebuilds it.
 
 2 (day 27): `files` and `exc_types` interning tables, `codes.filename` became `file_id`,
-and `ix_frames_entry` was added for the live-at-seq range query."""
+and `ix_frames_entry` was added for the live-at-seq range query.
+3 (day 29): `exceptions` gained `chained_cause_seq`/`chained_context_seq` -- the recorded
+`__cause__`/`__context__` object links (format 1.7, #11) -- so a chained exception is
+traversable to its root, distinct from the existing `cause_seq` journey link."""
 
 INDEXER_VERSION = 1
 """Bumped whenever an indexer's *output* changes for unchanged input -- a fixed bug, a new
@@ -116,12 +119,18 @@ CREATE INDEX ix_frames_code ON frames(code_id, entry_seq);
 
 -- query: "every exception of type T"         -> WHERE type_id=? ORDER BY seq
 -- query: "where did this one originate?"     -> follow cause_seq to the row with is_origin
+-- query: "walk this exception's chain to its root" -> follow chained_cause_seq /
+--        chained_context_seq (the recorded __cause__/__context__ links, day 29). These are
+--        the exception-*object* chain (`raise X from Y`); `cause_seq` is a single
+--        exception's propagation journey. Different questions, deliberately separate columns.
 CREATE TABLE exceptions(
     seq INTEGER PRIMARY KEY,
     type_id INTEGER NOT NULL,
     frame_id INTEGER NOT NULL,
     is_origin INTEGER NOT NULL,
-    cause_seq INTEGER
+    cause_seq INTEGER,
+    chained_cause_seq INTEGER,
+    chained_context_seq INTEGER
 );
 CREATE INDEX ix_exceptions_type ON exceptions(type_id, seq);
 

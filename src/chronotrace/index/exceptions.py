@@ -22,19 +22,25 @@ propagation with `UNWIND` and `EXCEPTION_HANDLED` instead.
 it. That day-6 decision is what makes this file eight lines of bookkeeping instead of a
 guess.
 
-What `cause_seq` links, and what it does not
----------------------------------------------
+Two kinds of "cause", kept in separate columns on purpose
+---------------------------------------------------------
 `cause_seq` points from a propagation event (`UNWIND`, `EXCEPTION_HANDLED`) back to the
 `RAISE` that started it, so "show me this exception's whole journey" is one indexed
 lookup. It is maintained by tracking the exception currently in flight during the single
 pass -- a stack, because an exception raised inside an `except` block is in flight while
-the first one still is.
+the first one still is. This is *one* exception moving through frames.
 
-It is **not** Python's `__cause__`/`__context__` chain (`raise X from Y`). The recorder
-does not record those: an event carries `exc_type_id`, and the link between two exception
-*objects* was never observed. That is a recorder limitation, tracked as issue #11, not
-something this layer can reconstruct -- inferring it from adjacency would be a guess
-presented as a fact, which is the one thing a debugger must not do.
+`chained_cause_seq` / `chained_context_seq` are the different thing: Python's
+`__cause__`/`__context__` chain (`raise X from Y`), which links two *distinct* exception
+objects. Until day 29 the recorder never observed that link (issue #11), and this file's
+docstring said so and refused to guess it from adjacency. Format 1.7 now records it -- the
+recorder maps each exception's id to its origin RAISE and reads the links off the object at
+raise time -- so these columns are a *recorded fact*, copied straight off the RAISE event,
+not an inference. A chain is walked to its root by following `chained_cause_seq` (explicit
+`from`) or, failing that, `chained_context_seq` (implicit), exactly as a Python traceback
+prints "The above exception was the direct cause" vs "During handling of the above". Where
+a link points into unrecorded code, it is None -- the chain genuinely ends outside the
+recording, and the day-29 query says so rather than pointing at the wrong frame.
 """
 
 from __future__ import annotations
@@ -45,8 +51,9 @@ from chronotrace.index.db import Batcher
 from chronotrace.recorder.events import Event, EventKind
 
 INSERT = (
-    "INSERT OR REPLACE INTO exceptions(seq, type_id, frame_id, is_origin, cause_seq) "
-    "VALUES (?,?,?,?,?)"
+    "INSERT OR REPLACE INTO exceptions"
+    "(seq, type_id, frame_id, is_origin, cause_seq, chained_cause_seq, chained_context_seq) "
+    "VALUES (?,?,?,?,?,?,?)"
 )
 
 _EXCEPTION_KINDS = (EventKind.RAISE, EventKind.UNWIND, EventKind.EXCEPTION_HANDLED)
@@ -74,7 +81,20 @@ class ExceptionIndexer:
         if origin:
             self._in_flight.append(event.seq)
         cause = self._in_flight[-1] if self._in_flight else None
-        self._batch.add((event.seq, event.exc_type_id, event.frame_id, int(origin), cause))
+        # The __cause__/__context__ links ride on the origin RAISE only (the recorder sets
+        # them nowhere else); a propagation row carries None, which is correct -- a crossing
+        # is not where a chain is decided.
+        self._batch.add(
+            (
+                event.seq,
+                event.exc_type_id,
+                event.frame_id,
+                int(origin),
+                cause,
+                event.exc_cause_seq,
+                event.exc_context_seq,
+            )
+        )
         if event.kind is EventKind.EXCEPTION_HANDLED and self._in_flight:
             self._in_flight.pop()
 
