@@ -125,8 +125,9 @@ def previous_hit(
 def heatmap(connection: sqlite3.Connection, file_id: int) -> dict[int, int]:
     """`lineno -> execution count` for one file. The source pane's background.
 
-    Computed rather than stored: see the module docstring. Measured at 1.6 ms on a
-    281k-event recording, because the clustered key already groups the rows.
+    Computed rather than stored: see the module docstring, which carries the measurement
+    (12.8 ms over 178,914 rows on a 281k-event recording) and the reason it is not
+    materialised (issue #12).
 
     Complexity: O(rows for this file), one contiguous scan with no sort.
     """
