@@ -36,6 +36,32 @@ def test_the_three_id_spaces_round_trip_through_a_real_file() -> None:
     assert restored.codes[1].qualname == "Klass.method"
 
 
+def test_source_hashes_round_trip_and_are_looked_up_by_filename() -> None:
+    """Format 1.7's trailing source-hash table survives the file and resolves by path."""
+    strings = Strings(
+        names=("total",),
+        codes=(CodeInfo("a.py", "main", 3),),
+        source_hashes=(("a.py", "deadbeef"), ("b.py", "cafef00d")),
+    )
+    restored = _written(strings).strings()
+    assert restored == strings
+    assert restored.hash_of("a.py") == "deadbeef"
+    assert restored.hash_of("missing.py") is None
+
+
+def test_a_pre_1_7_strings_block_decodes_with_no_source_hashes() -> None:
+    """A block that ends after `codes` (no trailing table) reads back with empty hashes.
+
+    Encoded here by truncating a real payload to just its names/exc/codes, as a 1.6 writer
+    would have left it -- the decoder must treat the absent table as (), not as an error."""
+    from chronotrace.store.strings import _COUNT
+
+    full = Strings(names=("x",), codes=(CodeInfo("a.py", "f", 1),))
+    payload = encode_strings(full)
+    legacy = payload[: -(_COUNT.size)]  # drop the trailing source-hash count (it was 0)
+    assert decode_strings(legacy).source_hashes == ()
+
+
 def test_a_recording_without_strings_reports_empty_not_broken() -> None:
     """Format 1.5 and earlier, or a crash that lost the block. Ids without names are a
     degraded view, not a failure -- the REPL still steps, it just shows numbers."""
