@@ -23,6 +23,18 @@ from pathlib import Path
 
 from chronotrace.config import RecorderConfig, find_pyproject, load_config
 from chronotrace.index import Progress, build_index
+from chronotrace.query import (
+    PAGE_SIZE,
+    Cursor,
+    Hit,
+    LineHitsQuery,
+    Query,
+    QueryContext,
+    QueryError,
+    QueryResult,
+    VarWritesQuery,
+    registry,
+)
 from chronotrace.recorder import MemorySink, Recorder
 from chronotrace.recorder.redact import Redactor
 from chronotrace.recorder.scope import Scope
@@ -68,6 +80,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     idx = sub.add_parser("index", help="build the query index for a recording")
     idx.add_argument("file", help="the .chrono file to index")
+
+    qry = sub.add_parser("query", help="ask the recording a question, get jumpable instants")
+    qry.add_argument("file", nargs="?", help="the .chrono recording to query")
+    qry.add_argument("--list", action="store_true", help="list the available queries and exit")
+    qry.add_argument("--var-writes", metavar="NAME", help="every write to variable NAME")
+    qry.add_argument("--line-hits", metavar="FILE:LINE", help="every instant FILE:LINE executed")
+    qry.add_argument("--frame", type=int, metavar="ID", help="scope --var-writes to one frame")
+    qry.add_argument("--before", type=int, metavar="SEQ", help="only writes strictly before SEQ")
+    qry.add_argument("--after", type=int, metavar="SEQ", help="resume paging after this instant")
+    qry.add_argument("--limit", type=int, metavar="N", help="rows per page (default: 100)")
 
     rep = sub.add_parser("repair", help="rebuild the footer of a crash-truncated recording")
     rep.add_argument("file", help="the .chrono file to repair")
@@ -254,6 +276,106 @@ def _report_progress(progress: Progress) -> None:
     print(f"\rchronotrace: indexing {progress.fraction:5.0%}", end="", file=sys.stderr)  # noqa: T201
 
 
+def query_command(args: argparse.Namespace) -> int:
+    """Run one query against a recording, printing jump-to-`seq` results. Returns an exit code.
+
+    The index is built on demand if it is missing (`QueryContext.open`), so a first query on
+    a bare recording just works -- it waits, once, rather than failing with "run index
+    first". `--list` needs no recording; every other form needs exactly one query flag.
+    """
+    if args.list:
+        for name, summary in registry.summaries().items():
+            print(f"  {name:12s} {summary}")  # noqa: T201
+        return 0
+    if not args.file:
+        print("chronotrace: query needs a .chrono file, or --list", file=sys.stderr)  # noqa: T201
+        return 2
+    try:
+        query = _build_query(args)
+    except ValueError as exc:
+        print(f"chronotrace: {exc}", file=sys.stderr)  # noqa: T201
+        return 2
+
+    recording = Path(args.file)
+    cursor = Cursor(args.after) if args.after is not None else None
+    try:
+        with QueryContext.open(recording, on_progress=_report_progress) as ctx:
+            result = query.execute(ctx, cursor, limit=args.limit or PAGE_SIZE)
+    except ChronoError as exc:
+        print(f"chronotrace: cannot read {recording}: {exc}", file=sys.stderr)  # noqa: T201
+        return 1
+    except QueryError as exc:
+        print(f"chronotrace: {exc}", file=sys.stderr)  # noqa: T201
+        return 1
+    _render(result, _empty_note(args))
+    return 0
+
+
+def _build_query(args: argparse.Namespace) -> Query:
+    """Turn the CLI flags into a typed query. Exactly one query flag, or it is an error."""
+    chosen = [flag for flag in (args.var_writes, args.line_hits) if flag is not None]
+    if len(chosen) != 1:
+        raise ValueError("give exactly one of --var-writes or --line-hits")
+    if args.var_writes is not None:
+        return VarWritesQuery(name=args.var_writes, frame_id=args.frame, before_seq=args.before)
+    file, sep, line = args.line_hits.rpartition(":")
+    if not sep or not line.isdigit():
+        raise ValueError(f"--line-hits wants FILE:LINE, e.g. app.py:42 (got {args.line_hits!r})")
+    return LineHitsQuery(file=file, lineno=int(line))
+
+
+def _render(result: QueryResult, empty_note: str) -> None:
+    """Print a page of hits, then the two things a page must not hide: partial and 'more'."""
+    if result.hits:
+        for hit in result.hits:
+            print(_format_hit(hit))  # noqa: T201
+    else:
+        print(empty_note)  # noqa: T201
+    if result.partial:
+        print(  # noqa: T201
+            "chronotrace: results are PARTIAL -- the recording is crash-truncated, so "
+            "instants past the truncation cannot be found.",
+            file=sys.stderr,
+        )
+    if result.next_cursor is not None:
+        print(  # noqa: T201
+            f"chronotrace: more results -- rerun with --after {result.next_cursor.after_seq}",
+            file=sys.stderr,
+        )
+
+
+def _format_hit(hit: Hit) -> str:
+    """One result line, led by its `[seq]` -- the address the UI will make clickable."""
+    parts = [f"[{hit.seq}]"]
+    if hit.file is not None:
+        where = Path(hit.file).name
+        parts.append(f"{where}:{hit.lineno}" if hit.lineno is not None else where)
+    if hit.function is not None:
+        parts.append(hit.function)
+    if hit.value_preview is not None:
+        parts.append(f"= {hit.value_preview}")
+    return "  ".join(parts)
+
+
+def _empty_note(args: argparse.Namespace) -> str:
+    """The right 'found nothing' message for the query that ran -- they are not the same.
+
+    A variable with no matching writes exists but was not written in the range asked for; a
+    line with no hits either never ran or is not executable, which the index cannot tell
+    apart without source. Each deserves its own honest sentence rather than a shared "0
+    results".
+    """
+    if args.var_writes is not None:
+        return (
+            f"chronotrace: {args.var_writes!r} exists but has no writes in the range you asked "
+            "for (try widening --before, or dropping --frame)."
+        )
+    return (
+        f"chronotrace: {args.line_hits} never executed -- or the line is blank, a comment, or "
+        "past the end of the file, which the index cannot distinguish without the source."
+    )
+
+
 def record_command(args: argparse.Namespace) -> int:
     """Record the target script to a `.chrono` file and index it."""
     config = load_config(
@@ -292,6 +414,8 @@ def main(argv: list[str] | None = None) -> int:
         return step_command(args)
     if args.command == "index":
         return index_command(args.file)
+    if args.command == "query":
+        return query_command(args)
     return record_command(args)
 
 

@@ -61,17 +61,19 @@ format stays free to change independently of how observation works.
 
 ## What exists today
 
-`recorder`, `store` and `reconstruct` are implemented: a program can be recorded,
-persisted durably, and scrubbed backward instant by instant. `index` is designed and its
-schema shipped; the layers above it are names in this diagram.
+`recorder`, `store`, `reconstruct` and `index` are implemented: a program can be recorded,
+persisted durably, scrubbed backward instant by instant, and asked timeline-wide questions.
+`query` has begun — a typed API with its first two queries — and the layers above it are
+names in this diagram.
 
 | Layer | Status | Built |
 |---|---|---|
 | recorder | **done** | days 4–10 |
 | store | **done (M2, day 18)** — writer + reader + zstd + value pool + keyframes + deltas + crash recovery, defaults tuned by grid ([`docs/format-spec.md`](format-spec.md), [ADR-0005](adr/0005-storage-defaults.md)) | days 11–18 |
 | reconstruct | **done (M3, day 24)** — `reconstruct(seq)` in O(log K), backward stepping, replay-equivalence referee ([ADR-0006](adr/0006-reconstruction.md)) | days 19–24 |
-| index | **designed** ([ADR-0008](adr/0008-index-schema.md)); schema shipped, indexers day 26 | days 25–31 |
-| query, server, frontend | planned | phases 4–5 |
+| index | **built** ([ADR-0008](adr/0008-index-schema.md)) — one-pass driver, five indexers: var writes, line hits, call tree, exceptions, density | days 25–27 |
+| query | **begun** — typed API, injected context, cursor pagination, a stated latency contract; `var-writes` and `line-hits` queries | days 28–31 |
+| server, frontend | planned | phases 4–5 |
 
 ## The storage format
 
@@ -124,6 +126,38 @@ rather than trusted when a stamped fingerprint says the recording changed. It st
 B-tree of pointers is uncompressed while the recording is columnar and zstd'd; the
 tradeoff, the timing decision, and the 10 GB consequence are all in
 [ADR-0008](adr/0008-index-schema.md).
+
+## The query engine: instants you can jump to
+
+The index makes the past *lookup-able*; the `query` layer makes it *interrogable*. Its one
+design idea, and the line the whole layer is built around: **a query result is a set of
+instants you can jump to.** A query that returns text is a `grep`; a query that returns
+`seq` numbers — the universal address every layer already speaks — is a debugger, because
+each result is a place you can land and inspect. Every query is a typed callable
+(`VarWritesQuery(name="total")`) with a typed result, run against an injected `QueryContext`
+that owns the recording and the index connection so they are opened once and closed once —
+and so a query can be handed a *fake* context in a test, which is the proof the injection is
+real rather than decorative. The full catalogue is [`docs/queries.md`](queries.md).
+
+Three decisions carry the layer, each argued in `src/chronotrace/query/types.py`:
+
+- **A typed API, not a query DSL.** A language needs a parser, a grammar, error messages,
+  documentation and a stability promise — all before anyone knows which queries matter. The
+  type checker is the parser instead. A DSL is revisited only when a real user is composing
+  queries by hand, repeatedly, because the API cannot express what they mean
+  ([#13](https://github.com/dharmppp21/ChronoTrace/issues/13)).
+- **Cursor pagination, never an unbounded list.** "Every write to `i`" in a hot loop is ten
+  million rows. Results come one page at a time, and the cursor is a `seq` (`WHERE seq > ?`)
+  rather than an `OFFSET`: an `OFFSET` re-reads and discards every earlier row, so paging to
+  the end is O(rows²), while a `seq` cursor costs the same on page one and page ten thousand
+  and — being unique and monotonic — can neither skip a row nor return one twice.
+- **A latency contract that is asserted, not hoped for.** p95 < 50 ms on a ten-million-event
+  recording, checked by a test that also inspects the query plan, so a budget met by a full
+  scan cannot pass. The clustered index keeps a page query at O(log n + page).
+
+Results are honest about their edges: a partial (crash-truncated) recording flags every
+result `partial` rather than silently under-reporting, and a typo (`no such variable`, `no
+such file`) is a different, louder answer than a valid query that found nothing.
 
 ## How correctness is established
 
