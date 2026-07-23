@@ -42,11 +42,31 @@ class _Entry:
 _QUERIES: dict[str, _Entry] = {
     "var-writes": _Entry(
         "chronotrace.query.var_writes:VarWritesQuery",
-        "every write to a variable, newest context first",
+        "every write to a variable, oldest first",
     ),
     "line-hits": _Entry(
         "chronotrace.query.line_hits:LineHitsQuery",
         "every instant a source line executed",
+    ),
+    "last-write": _Entry(
+        "chronotrace.query.last_write:LastWriteBeforeQuery",
+        "the single last write to a variable before an instant",
+    ),
+    "exception-origin": _Entry(
+        "chronotrace.query.exception_origin:ExceptionOriginQuery",
+        "where an exception was born, and its cause chain to the root",
+    ),
+    "provenance": _Entry(
+        "chronotrace.query.provenance:ValueProvenanceQuery",
+        "the write that produced a value, plus its likely inputs (heuristic)",
+    ),
+    "callers-of": _Entry(
+        "chronotrace.query.call_tree:CallersOfQuery",
+        "every invocation of a function, and where it was called from",
+    ),
+    "call-tree": _Entry(
+        "chronotrace.query.call_tree:CallTreeQuery",
+        "the direct children of a frame, in call order",
     ),
 }
 

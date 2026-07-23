@@ -86,6 +86,10 @@ class UnknownFile(QueryError):
     """The file is not in this recording -- as opposed to a line in it that never ran."""
 
 
+class UnknownFunction(QueryError):
+    """No function of that qualified name was recorded -- a typo, not "never called"."""
+
+
 @dataclass(frozen=True, slots=True)
 class Cursor:
     """Where the next page resumes: strictly after this `seq`.
@@ -120,6 +124,10 @@ class Hit:
     lineno: int | None = None
     function: str | None = None
     value_preview: str | None = None
+    note: str | None = None
+    """Why this instant is in the result -- a causal query's annotation on a hit ("the write
+    that set this value", "direct cause (__cause__)", "likely input -- heuristic"). Optional
+    and display-only; a plain lookup leaves it None."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,6 +143,15 @@ class QueryResult:
     hits: tuple[Hit, ...]
     next_cursor: Cursor | None
     partial: bool
+
+    @classmethod
+    def empty(cls, partial: bool) -> QueryResult:
+        """A complete, empty answer -- what a query returns when it found nothing to jump to.
+
+        Its own constructor because "no hits, no next page" recurs across the single-result
+        causal queries, and one name for it beats six copies of `((), None, partial)`.
+        """
+        return cls((), None, partial)
 
     @classmethod
     def page(cls, hits: list[Hit], *, limit: int, partial: bool) -> QueryResult:

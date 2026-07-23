@@ -31,29 +31,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from chronotrace.index.var_writes import DELETED
-from chronotrace.query.types import (
-    PAGE_SIZE,
-    Cursor,
-    Hit,
-    QueryContext,
-    QueryResult,
-    UnknownName,
-    after_bound,
-)
+from chronotrace.query._resolve import Location, frame_location, name_id, value_preview
+from chronotrace.query.types import PAGE_SIZE, Cursor, Hit, QueryContext, QueryResult, after_bound
 
 if TYPE_CHECKING:
     import sqlite3
-
-MAX_PREVIEW_CHARS = 120
-"""How much of a value's `repr` a `Hit` carries. The capture policy already bounds the
-value; this bounds the *preview line*, so one big dict cannot fill a result page."""
-
-_LOCATION = (
-    "SELECT c.qualname, f.path FROM frames fr "
-    "JOIN codes c ON fr.code_id = c.code_id "
-    "JOIN files f ON c.file_id = f.file_id WHERE fr.frame_id = ?"
-)
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,9 +57,9 @@ class VarWritesQuery:
         self, ctx: QueryContext, cursor: Cursor | None = None, *, limit: int = PAGE_SIZE
     ) -> QueryResult:
         """Return one page of writes. Raises `UnknownName` if the variable never existed."""
-        name_id = self._name_id(ctx)
-        rows = self._page(ctx.db, name_id, cursor, limit)
-        seen: dict[int, tuple[str | None, str | None]] = {}
+        resolved = name_id(ctx.db, self.name)
+        rows = self._page(ctx.db, resolved, cursor, limit)
+        seen: dict[int, Location] = {}
         hits = [
             self._hit(ctx, int(seq), int(frame_id), int(value_ref), seen)
             for seq, frame_id, value_ref in rows
@@ -90,18 +72,13 @@ class VarWritesQuery:
         seq: int,
         frame_id: int,
         value_ref: int,
-        seen: dict[int, tuple[str | None, str | None]],
+        seen: dict[int, Location],
     ) -> Hit:
         """One write turned into a jumpable instant: where it happened, what it wrote."""
-        function, file = _location(ctx.db, frame_id, seen)
-        return Hit(seq=seq, function=function, file=file, value_preview=_preview(ctx, value_ref))
-
-    def _name_id(self, ctx: QueryContext) -> int:
-        """Resolve the typed name to its id, or reject it as a typo -- not an empty result."""
-        row = ctx.db.execute("SELECT id FROM strings WHERE text = ?", (self.name,)).fetchone()
-        if row is None:
-            raise UnknownName(f"no variable named {self.name!r} was recorded")
-        return int(row[0])
+        function, file = frame_location(ctx.db, frame_id, seen)
+        return Hit(
+            seq=seq, function=function, file=file, value_preview=value_preview(ctx, value_ref)
+        )
 
     def _page(
         self, db: sqlite3.Connection, name_id: int, cursor: Cursor | None, limit: int
@@ -128,31 +105,3 @@ class VarWritesQuery:
             f"WHERE {where} ORDER BY seq LIMIT ?"
         )
         return list(db.execute(sql, params))
-
-
-def _location(
-    db: sqlite3.Connection, frame_id: int, cache: dict[int, tuple[str | None, str | None]]
-) -> tuple[str | None, str | None]:
-    """`(function, file)` for a frame, memoised across a page -- writes share frames."""
-    if frame_id not in cache:
-        row = db.execute(_LOCATION, (frame_id,)).fetchone()
-        cache[frame_id] = (row[0], row[1]) if row is not None else (None, None)
-    return cache[frame_id]
-
-
-def _preview(ctx: QueryContext, value_ref: int) -> str | None:
-    """A short `repr` of the written value -- or `<deleted>` for a `del`, None if lost.
-
-    A `del x` is stored as a row with no value (day 24), and it is a real answer to "who
-    last wrote x", so it is shown rather than skipped. A value the pool has lost is a
-    corrupt recording, not a `None`: it renders as absent, never as a fake value.
-    """
-    if value_ref == DELETED:
-        return "<deleted>"
-    from chronotrace.reconstruct import MissingValue
-
-    try:
-        text = repr(ctx.resolver.resolve(value_ref))
-    except MissingValue:
-        return None
-    return text if len(text) <= MAX_PREVIEW_CHARS else f"{text[:MAX_PREVIEW_CHARS]}..."

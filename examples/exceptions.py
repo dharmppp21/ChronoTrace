@@ -68,3 +68,29 @@ def main() -> list[str]:
 
 if __name__ == "__main__":
     print(main())
+
+
+def deep_chain() -> str:
+    """Shape 5 (day 29): a five-deep explicit `__cause__` chain, root buried deepest.
+
+    RuntimeError <- TypeError <- IndexError <- KeyError <- ValueError("root"). Walking the
+    recorded chain from the surface RuntimeError must reach the ValueError, not stop early.
+    Defined after `main` and deliberately *not* called from it, so the four-shape golden
+    stream that `test_exceptions.py` pins is untouched.
+    """
+    try:
+        try:
+            try:
+                try:
+                    raise ValueError("root")
+                except ValueError as e1:
+                    raise KeyError("second") from e1
+            except KeyError as e2:
+                raise IndexError("third") from e2
+        except IndexError as e3:
+            raise TypeError("fourth") from e3
+    except TypeError as e4:
+        try:
+            raise RuntimeError("the surface error") from e4
+        except RuntimeError:
+            return "deep"

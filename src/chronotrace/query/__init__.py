@@ -24,7 +24,11 @@ one, are argued in `types.py` and tracked as issue #13.
 """
 
 from chronotrace.query import registry
+from chronotrace.query.call_tree import CallersOfQuery, CallTreeQuery
+from chronotrace.query.exception_origin import ExceptionOriginQuery
+from chronotrace.query.last_write import LastWriteBeforeQuery
 from chronotrace.query.line_hits import LineHitsQuery
+from chronotrace.query.provenance import ValueProvenanceQuery
 from chronotrace.query.types import (
     PAGE_SIZE,
     Cursor,
@@ -34,21 +38,28 @@ from chronotrace.query.types import (
     QueryError,
     QueryResult,
     UnknownFile,
+    UnknownFunction,
     UnknownName,
 )
 from chronotrace.query.var_writes import VarWritesQuery
 
 __all__ = [
     "PAGE_SIZE",
+    "CallTreeQuery",
+    "CallersOfQuery",
     "Cursor",
+    "ExceptionOriginQuery",
     "Hit",
+    "LastWriteBeforeQuery",
     "LineHitsQuery",
     "Query",
     "QueryContext",
     "QueryError",
     "QueryResult",
     "UnknownFile",
+    "UnknownFunction",
     "UnknownName",
+    "ValueProvenanceQuery",
     "VarWritesQuery",
     "registry",
 ]
