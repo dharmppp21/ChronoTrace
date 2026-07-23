@@ -271,6 +271,48 @@ the whole design protects. The honest consequence is that a crash-truncated reco
 no index — and that is exactly the recording most worth querying — so the first query
 builds one from the recovered prefix. ([ADR-0008](adr/0008-index-schema.md).)
 
+## 3c. Causal queries: from *what* to *why*
+
+The index turns "what was the state at S?" into "when did X happen?". The **query engine**
+turns that into the questions a debugger exists to answer — and the answer to every one is
+a set of **instants you can jump to**, never text. Two of them do things no other Python
+tool does.
+
+**"Where did this exception really come from?"** A traceback shows you the frames an
+exception crossed and the line it surfaced on. It does *not* show the program state at the
+moment it was born, and for a chained exception it prints the earlier exception's message
+but cannot take you to *its* birthplace with *its* locals. ChronoTrace does both. It walks
+to the birth (the recorder marks only the first of the RAISE events CPython fires in every
+crossed frame), then follows the recorded `__cause__` / `__context__` links to the root:
+
+```
+RuntimeError  born at [25]  <- the direct cause: KeyError born at [19]  (the root)
+```
+
+Recording those links required going back into the recorder ([#11]): at each raise, it maps
+the exception's identity to the instant it was born, so a later `raise X from Y` can point X
+back at Y. The link is a *recorded fact*, not a guess from adjacency — which matters,
+because the earlier exception is often already marked handled by the time the next one is
+raised, so nothing on the timeline's surface connects them.
+
+**"Where did this value come from?"** This is where honesty is the whole design. ChronoTrace
+records writes, not reads (recording every read would multiply event volume for a question
+nobody asks). So the exact, always-correct answer is *the write that produced this value*
+and the state there — the inputs are on screen for a human to read. On top of that comes a
+*heuristic*: parse the writing line's source, find the names it reads, resolve each to its
+own last write. That guess is presented as **"likely inputs", never "the cause"**, and it
+**refuses to run against a source file that changed since the recording** — each file's
+SHA-256 was stored at record time, and a mismatch makes the heuristic decline rather than
+confidently describe a line that no longer exists.
+
+That refusal is the rule the whole engine is built on: *an approximation shown honestly is a
+feature; an approximation shown as truth is a lie.* It is why the demo bug —
+`totals = dict.fromkeys(...)`, a dict aliased under three keys ~360 events before any wrong
+number prints — is solved by a single provenance query that lands on the initialisation
+line, not by stepping forward past a hundred correct-looking `+=`s. ([queries.md](queries.md).)
+
+[#11]: https://github.com/dharmppp21/ChronoTrace/issues/11
+
 ## 4. Proving it is right
 
 This is the part I would most want a reader to take seriously, because a debugger that

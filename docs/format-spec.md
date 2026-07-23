@@ -1,6 +1,6 @@
 # The `.chrono` file format — normative specification
 
-**Format version 1.5.** This document defines the on-disk `.chrono` format
+**Format version 1.7.** This document defines the on-disk `.chrono` format
 precisely enough to implement a reader or writer in any language. Where it and the
 code disagree, this document is the contract; `src/chronotrace/store/constants.py`
 is its machine form and `tests/store/test_constants.py` pins the byte layout.
@@ -61,7 +61,7 @@ that the writer was killed mid-recording; see [§7 Reading](#7-reading).
 |---:|---:|---|---|---|
 | 0 | 11 | bytes | `magic` | `89 43 48 52 4F 4E 4F 0D 0A 1A 0A` (`\x89CHRONO\r\n\x1a\n`) |
 | 11 | 2 | u16 | `version_major` | `1` |
-| 13 | 2 | u16 | `version_minor` | `4` |
+| 13 | 2 | u16 | `version_minor` | `7` |
 | 15 | 8 | u64 | `flags` | feature bitfield ([§8](#8-evolution)); `0` in 1.0 |
 | 23 | 2 | u16 | `header_size` | `32` — offset at which the first block begins |
 | 25 | 7 | — | *reserved* | zero |
@@ -202,6 +202,14 @@ followed by `entry_count` entries, each a u32 `length` and that many UTF-8 bytes
 Table order is fixed: `0` filenames, `1` code-object descriptors, `2` variable
 names, `3` exception type names. An id is an index into its table.
 
+**Source hashes (format 1.7)** are appended after the tables: a u32 `count`, then that
+many `(filename, hex_sha256)` pairs, each string a u32 `length` and its UTF-8 bytes. Each
+is a recorded source file's SHA-256 at record time, so a provenance query can refuse to
+analyse a file that changed. Appended last, so a pre-1.7 reader stops after the tables and
+is unaffected — the same trailing-addition trick the EVENTS `ncols` uses.
+(This section's exact table layout has drifted from the code and is tracked for
+reconciliation; the code in `store/strings.py` is authoritative meanwhile.)
+
 ### 6.3 EVENTS
 
 One block holds up to **N events** (default `N = 65536`; the block-size experiment
@@ -213,10 +221,20 @@ on. This is the core design decision — see
 Payload:
 
 1. u32 `event_count` (`≤ N`).
-2. Ten columns, in this exact order (the field order of `recorder.events.Event`):
+2. u16 `ncols` — the number of columns that follow (**format 1.7+**). A payload written
+   before 1.7 has no `ncols` and always carries exactly the first ten columns; a reader
+   keys off the file's `version_minor` to know which. From 1.7 the count is
+   self-describing, so a future column can be appended with no reader change: a reader
+   reads the columns it knows and ignores any beyond, and a pre-1.7 file's absent columns
+   read back as `None`.
+3. `ncols` columns, in this exact order (the field order of `recorder.events.Event`):
    `seq`, `kind`, `timestamp_ns`, `thread_id`, `frame_id`, `code_id`, `lineno`,
-   `name_id`, `value_ref`, `exc_type_id`. `None` is encoded as `-1` (these fields
-   are otherwise non-negative).
+   `name_id`, `value_ref`, `exc_type_id`, then (**1.7**) `exc_cause_seq`,
+   `exc_context_seq`. `None` is encoded as `-1` (these fields are otherwise
+   non-negative). The last two are the recorded `__cause__` / `__context__` links of an
+   origin `RAISE` — the `seq` of the origin RAISE of the chained exception, or `-1` if
+   there is no such link or it points into unrecorded code
+   ([#11](https://github.com/dharmppp21/ChronoTrace/issues/11), day 29).
 
    **A `VAR_WRITE` whose `value_ref` is `-1` is a deletion** (`del x`), not a write of
    some null value — the binding named by `name_id` ceased to exist (1.5, day 24). This
@@ -225,7 +243,7 @@ Payload:
    is the defect ([#7](https://github.com/dharmppp21/ChronoTrace/issues/7)) the version
    records. It is a **semantic** bump: the meaning of existing bytes changed, which is
    the drift a spec exists to pin down.
-3. Each column is: a u8 `codec`, a u32 `byte_length`, then `byte_length` bytes.
+4. Each column is: a u8 `codec`, a u32 `byte_length`, then `byte_length` bytes.
 
 When the block is compressed (1.1), the `u32 event_count` stays **uncompressed** at
 the front of the payload and only the columns after it form the compression frame
@@ -428,10 +446,17 @@ so an older reader skips it rather than misparsing it. **1.3 (day 16)**
 added the optional `DELTAS` block the same way. **1.5 (day 24)** is the one change that
 altered no bytes at all: it gave an existing encoding (`value_ref = -1` on a `VAR_WRITE`)
 a second meaning. That is the most dangerous kind of change, because nothing in the file
-looks different — which is exactly why it took a version number. Every change was
-disciplined exactly as
-this section requires: a reserved slot and a minor bump, never a silent reinterpretation
+looks different — which is exactly why it took a version number. **1.6 (day 26)** activated
+the reserved optional `STRINGS` block: the recording's own intern tables, so ids resolve to
+text without the recorder. **1.7 (day 29)** appended two EVENTS columns (`exc_cause_seq`,
+`exc_context_seq` — the recorded exception chain, [#11]) and made the EVENTS payload
+self-describe its column count, so future columns append with no reader change; it also
+appended a source-hash table to STRINGS. Both are trailing additions read only by a reader
+that knows them. Every change was disciplined exactly as this section requires: a reserved
+slot or a trailing/self-describing addition and a minor bump, never a silent reinterpretation
 of existing bytes.
+
+[#11]: https://github.com/dharmppp21/ChronoTrace/issues/11
 
 ## 9. Security
 

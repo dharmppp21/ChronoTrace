@@ -15,23 +15,30 @@ the recorder's process would then carry (see the zero-deps note in pyproject.tom
 from __future__ import annotations
 
 import argparse
+import hashlib
 import io
 import os
 import runpy
 import sys
+from collections.abc import Iterable
 from pathlib import Path
 
 from chronotrace.config import RecorderConfig, find_pyproject, load_config
 from chronotrace.index import Progress, build_index
 from chronotrace.query import (
     PAGE_SIZE,
+    CallersOfQuery,
+    CallTreeQuery,
     Cursor,
+    ExceptionOriginQuery,
     Hit,
+    LastWriteBeforeQuery,
     LineHitsQuery,
     Query,
     QueryContext,
     QueryError,
     QueryResult,
+    ValueProvenanceQuery,
     VarWritesQuery,
     registry,
 )
@@ -86,6 +93,13 @@ def build_parser() -> argparse.ArgumentParser:
     qry.add_argument("--list", action="store_true", help="list the available queries and exit")
     qry.add_argument("--var-writes", metavar="NAME", help="every write to variable NAME")
     qry.add_argument("--line-hits", metavar="FILE:LINE", help="every instant FILE:LINE executed")
+    qry.add_argument("--last-write", metavar="NAME@SEQ", help="the last write to NAME before SEQ")
+    qry.add_argument("--provenance", metavar="NAME@SEQ", help="where NAME's value at SEQ came from")
+    qry.add_argument(
+        "--exception-origin", type=int, metavar="SEQ", help="where the exception at SEQ was born"
+    )
+    qry.add_argument("--callers-of", metavar="FUNC", help="every invocation of function FUNC")
+    qry.add_argument("--call-tree", type=int, metavar="FRAME", help="the direct children of FRAME")
     qry.add_argument("--frame", type=int, metavar="ID", help="scope --var-writes to one frame")
     qry.add_argument("--before", type=int, metavar="SEQ", help="only writes strictly before SEQ")
     qry.add_argument("--after", type=int, metavar="SEQ", help="resume paging after this instant")
@@ -217,7 +231,28 @@ def intern_tables(recorder: Recorder) -> Strings:
             CodeInfo(code.co_filename, code.co_qualname, code.co_firstlineno)
             for code in recorder.codes
         ),
+        source_hashes=_source_hashes(code.co_filename for code in recorder.codes),
     )
+
+
+def _source_hashes(filenames: Iterable[str]) -> tuple[tuple[str, str], ...]:
+    """SHA-256 of each unique, readable recorded source file -- for provenance verification.
+
+    Hashed here, at write time in the same run that recorded, so the digest is of the
+    source *as it ran*. A file that cannot be read now (`<string>` from `exec`, a deleted
+    temp, a C-backed module) is omitted rather than faked -- no entry means a later query
+    reads it as "cannot verify", never as "verified". The recorder itself never does this
+    I/O; it belongs above the hot path.
+    """
+    digests: dict[str, str] = {}
+    for filename in filenames:
+        if filename in digests:
+            continue
+        try:
+            digests[filename] = hashlib.sha256(Path(filename).read_bytes()).hexdigest()
+        except OSError:
+            continue  # unreadable source: omit, so the query cannot mistake it for verified
+    return tuple(digests.items())
 
 
 def _to_chrono(recorder: Recorder, sink: MemorySink) -> bytes:
@@ -312,16 +347,55 @@ def query_command(args: argparse.Namespace) -> int:
 
 
 def _build_query(args: argparse.Namespace) -> Query:
-    """Turn the CLI flags into a typed query. Exactly one query flag, or it is an error."""
-    chosen = [flag for flag in (args.var_writes, args.line_hits) if flag is not None]
-    if len(chosen) != 1:
-        raise ValueError("give exactly one of --var-writes or --line-hits")
+    """Turn the CLI flags into a typed query. Exactly one query flag, or it is an error.
+
+    This is where the typed API pays off: each flag maps to a constructor call, and a
+    composed query (origin then provenance) is a call, not a parse. A DSL would have made
+    this a grammar; here it is a dispatch (see the day-28 no-DSL decision, #13).
+    """
+    given = {
+        name: value
+        for name, value in (
+            ("--var-writes", args.var_writes),
+            ("--line-hits", args.line_hits),
+            ("--last-write", args.last_write),
+            ("--provenance", args.provenance),
+            ("--exception-origin", args.exception_origin),
+            ("--callers-of", args.callers_of),
+            ("--call-tree", args.call_tree),
+        )
+        if value is not None
+    }
+    if len(given) != 1:
+        raise ValueError("give exactly one query flag (e.g. --var-writes, --provenance)")
     if args.var_writes is not None:
         return VarWritesQuery(name=args.var_writes, frame_id=args.frame, before_seq=args.before)
-    file, sep, line = args.line_hits.rpartition(":")
-    if not sep or not line.isdigit():
-        raise ValueError(f"--line-hits wants FILE:LINE, e.g. app.py:42 (got {args.line_hits!r})")
-    return LineHitsQuery(file=file, lineno=int(line))
+    if args.line_hits is not None:
+        file, sep, line = args.line_hits.rpartition(":")
+        if not sep or not line.isdigit():
+            raise ValueError(
+                f"--line-hits wants FILE:LINE, e.g. app.py:42 (got {args.line_hits!r})"
+            )
+        return LineHitsQuery(file=file, lineno=int(line))
+    if args.last_write is not None:
+        name, seq = _name_at_seq("--last-write", args.last_write)
+        return LastWriteBeforeQuery(name=name, seq=seq, frame_id=args.frame)
+    if args.provenance is not None:
+        name, seq = _name_at_seq("--provenance", args.provenance)
+        return ValueProvenanceQuery(name=name, seq=seq)
+    if args.exception_origin is not None:
+        return ExceptionOriginQuery(seq=args.exception_origin)
+    if args.callers_of is not None:
+        return CallersOfQuery(function=args.callers_of)
+    return CallTreeQuery(frame_id=args.call_tree)
+
+
+def _name_at_seq(flag: str, value: str) -> tuple[str, int]:
+    """Parse a `NAME@SEQ` argument, or explain the shape. Splits on the last `@`."""
+    name, sep, seq = value.rpartition("@")
+    if not sep or not seq.lstrip("-").isdigit():
+        raise ValueError(f"{flag} wants NAME@SEQ, e.g. total@1500 (got {value!r})")
+    return name, int(seq)
 
 
 def _render(result: QueryResult, empty_note: str) -> None:
@@ -354,25 +428,48 @@ def _format_hit(hit: Hit) -> str:
         parts.append(hit.function)
     if hit.value_preview is not None:
         parts.append(f"= {hit.value_preview}")
-    return "  ".join(parts)
+    line = "  ".join(parts)
+    return f"{line}   -- {hit.note}" if hit.note is not None else line
 
 
 def _empty_note(args: argparse.Namespace) -> str:
     """The right 'found nothing' message for the query that ran -- they are not the same.
 
-    A variable with no matching writes exists but was not written in the range asked for; a
-    line with no hits either never ran or is not executable, which the index cannot tell
-    apart without source. Each deserves its own honest sentence rather than a shared "0
-    results".
+    Each query's empty result means something specific, and a shared "0 results" would send
+    a user chasing the wrong thing. An unrecorded origin is not a bug in their query; a line
+    that never ran is not the same as one that does not exist.
     """
     if args.var_writes is not None:
         return (
             f"chronotrace: {args.var_writes!r} exists but has no writes in the range you asked "
             "for (try widening --before, or dropping --frame)."
         )
+    if args.line_hits is not None:
+        return (
+            f"chronotrace: {args.line_hits} never executed -- or the line is blank, a comment, or "
+            "past the end of the file, which the index cannot distinguish without the source."
+        )
+    if args.last_write is not None:
+        return (
+            f"chronotrace: no write to {args.last_write} was recorded"
+            " -- nothing set it before then."
+        )
+    if args.provenance is not None:
+        return f"chronotrace: no write to {args.provenance} was recorded -- nothing to trace."
+    if args.exception_origin is not None:
+        return (
+            f"chronotrace: no exception with a recorded origin is visible at seq "
+            f"{args.exception_origin} -- it may have been raised in code ChronoTrace did not "
+            "record (the stdlib, or a C extension)."
+        )
+    if args.callers_of is not None:
+        return (
+            f"chronotrace: {args.callers_of!r} was recorded but not called"
+            " in the range you asked for."
+        )
     return (
-        f"chronotrace: {args.line_hits} never executed -- or the line is blank, a comment, or "
-        "past the end of the file, which the index cannot distinguish without the source."
+        f"chronotrace: frame {args.call_tree} has no recorded children -- a leaf call, or the "
+        "frame id is not one this recording assigned."
     )
 
 
