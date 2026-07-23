@@ -108,10 +108,10 @@ def test_blocks_are_decoded_lazily_and_cached(monkeypatch: Any) -> None:
 
     calls = 0
 
-    def counting(payload: bytes) -> list[Event]:
+    def counting(payload: bytes, minor: int) -> list[Event]:
         nonlocal calls
         calls += 1
-        return real(payload)
+        return real(payload, minor)
 
     monkeypatch.setattr("chronotrace.store.reader.decode_events", counting)
 

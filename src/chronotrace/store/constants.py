@@ -51,7 +51,7 @@ FORMAT_VERSION_MAJOR = 1
 """Incompatible-change counter. A reader MUST refuse a file whose major exceeds
 its own -- the layout may have changed in ways it cannot parse."""
 
-FORMAT_VERSION_MINOR = 6
+FORMAT_VERSION_MINOR = 7
 """Backward-compatible-addition counter. A reader MAY open a file with a higher
 minor than its own: new *optional* blocks are skippable and new header fields live
 past `header_size`. It MUST NOT guess at anything it does not recognise.
@@ -81,6 +81,16 @@ past `header_size`. It MUST NOT guess at anything it does not recognise.
   index could exist at all -- an index must be rebuildable from the recording alone, and
   without these a query cannot turn the name a user types into the id events carry
   (ADR-0008 section 7). Optional, so an older reader skips it and sees ids.
+* 7 (day 29) made two additions, both for causal queries (issue #11). The EVENTS payload
+  gained two columns -- `exc_cause_seq` and `exc_context_seq`, the origin RAISE's
+  `__cause__`/`__context__` links -- so a chained exception is traversable to its root;
+  and it now self-describes its column count (a `u16 ncols` after the event count), which
+  is what keeps this a minor bump rather than a major one: an older reader reads the ten
+  columns it knows and ignores the two it does not, a newer reader reads a pre-1.7 file as
+  ten columns (see `columnar.NCOLS_MINOR`). The optional STRINGS block also gained a
+  trailing source-hash table (each recorded source file's SHA-256 at record time), so a
+  provenance query can refuse to analyse a source file that changed since -- appended after
+  the existing tables, so an older reader stops before it and is unaffected.
 
 A current reader reads every earlier file unchanged; an older reader opening a newer
 file skips the optional blocks it does not know and loses only fast seek, not data."""

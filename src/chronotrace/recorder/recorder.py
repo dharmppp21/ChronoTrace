@@ -59,6 +59,7 @@ import itertools
 import sys
 import threading
 import time
+import weakref
 from types import CodeType, TracebackType
 from typing import Any
 
@@ -119,6 +120,7 @@ class Recorder:
         "_capture_values",
         "_codes",
         "_dropped",
+        "_exc_raise_seq",
         "_exc_types",
         "_frames",
         "_identity",
@@ -188,6 +190,11 @@ class Recorder:
         # crosses; see EventKind.RAISE. Safe to key on id() because the object is
         # alive for the whole propagation -- the frames it is unwinding hold it.
         self._propagating: int | None = None
+        # id(exception) -> the seq of its origin RAISE, so a later `raise X from Y`
+        # (or an implicit context) can link X's RAISE back to Y's. Entries are dropped
+        # by a weakref finalizer when the exception dies, which both bounds the map to
+        # live exceptions and stops a reused id() from aliasing a dead one (day 29, #11).
+        self._exc_raise_seq: dict[int, int] = {}
 
     @property
     def dropped(self) -> int:
@@ -411,16 +418,39 @@ class Recorder:
             if exc_id == self._propagating:
                 return None  # same exception, one frame further up: not an origin
             self._propagating = exc_id
-            self._emit(
+            seq = self._emit(
                 EventKind.RAISE,
                 code,
                 self._frames.id_of(sys._getframe(1)),
                 code.co_firstlineno,
                 exc_type_id=self._exc_types.intern(type(exception).__name__),
+                exc_cause_seq=self._raise_seq_of(exception.__cause__),
+                exc_context_seq=self._raise_seq_of(exception.__context__),
             )
+            self._remember_raise(exception, exc_id, seq)
         except Exception:
             self._dropped += 1
         return None
+
+    def _raise_seq_of(self, related: BaseException | None) -> int | None:
+        """The origin-RAISE seq of a `__cause__`/`__context__` exception, if we recorded it.
+
+        None when there is no such link, or the linked exception was raised in code we do
+        not record (the stdlib, a C extension) -- in which case the chain genuinely ends
+        outside the recording, and saying so is more honest than pointing at the wrong frame.
+        """
+        return None if related is None else self._exc_raise_seq.get(id(related))
+
+    def _remember_raise(self, exception: BaseException, exc_id: int, seq: int) -> None:
+        """Map this exception's id to its origin RAISE, dropping the entry when it dies.
+
+        The finalizer is what keeps the map bounded to live exceptions and prevents a
+        reused id() from resolving to a long-dead exception's RAISE -- correctness, not
+        just housekeeping. It holds the id and the dict, never the exception, so it cannot
+        keep the exception alive.
+        """
+        self._exc_raise_seq[exc_id] = seq
+        weakref.finalize(exception, self._exc_raise_seq.pop, exc_id, None)
 
     def _on_unwind(self, code: CodeType, instruction_offset: int, exception: BaseException) -> Any:
         """A frame is exiting because of an exception.
@@ -472,11 +502,18 @@ class Recorder:
         exc_type_id: int | None = None,
         name_id: int | None = None,
         value_ref: ValueRef | None = None,
-    ) -> None:
-        """The one place an Event is built. Every callback routes through here."""
+        exc_cause_seq: int | None = None,
+        exc_context_seq: int | None = None,
+    ) -> int:
+        """The one place an Event is built. Every callback routes through here.
+
+        Returns the `seq` it assigned, so `_on_raise` can remember which instant an
+        exception was born at for a later `raise X from Y` to link back to.
+        """
+        seq = next(self._seq)
         self.sink.emit(
             Event(
-                seq=next(self._seq),
+                seq=seq,
                 kind=kind,
                 timestamp_ns=time.perf_counter_ns(),
                 thread_id=threading.get_ident(),
@@ -486,8 +523,11 @@ class Recorder:
                 exc_type_id=exc_type_id,
                 name_id=name_id,
                 value_ref=value_ref,
+                exc_cause_seq=exc_cause_seq,
+                exc_context_seq=exc_context_seq,
             )
         )
+        return seq
 
     def _callbacks(self) -> tuple[tuple[int, Any], ...]:
         """The event-to-handler wiring, in one place.

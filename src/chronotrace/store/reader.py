@@ -111,6 +111,7 @@ class ChronoReader:
         "_delta_cache",
         "_file",
         "_keyframes",
+        "_minor",
         "_mmap",
         "_pool",
         "_starts",
@@ -137,6 +138,7 @@ class ChronoReader:
         self._blocks: list[_Block] = []
         self._starts: list[int] = []
         self._count = 0
+        self._minor = 0  # the file's format minor; set by _validate_header, drives decode
         self._truncated = False
         self._values_offset: int | None = None
         self._pool: list[bytes] | None = None  # the decoded value pool, decoded once, lazily
@@ -187,6 +189,7 @@ class ChronoReader:
                 f"file is format v{major}.{minor}; this reader supports up to "
                 f"v{FORMAT_VERSION_MAJOR}.x -- upgrade ChronoTrace"
             )
+        self._minor = int(minor)  # drives version-aware EVENTS column decoding
 
     def _build_index(self) -> None:
         footer = self._blocks_from_footer()
@@ -353,7 +356,9 @@ class ChronoReader:
             return cached
         try:
             _bt, flags, payload, _next = decode_block(self._buf, offset)  # CRC-checked
-            events = decode_events(self._events_payload(flags, payload))  # bounded (columnar.py)
+            events = decode_events(  # bounded (columnar.py); minor drives the column count
+                self._events_payload(flags, payload), self._minor
+            )
         except (BlockError, ValueError, struct.error) as exc:
             raise CorruptRecording(f"block at offset {offset}: {exc}") from exc
         self._cache[offset] = events

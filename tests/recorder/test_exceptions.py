@@ -73,20 +73,35 @@ def test_raised_and_caught_in_one_frame_produces_no_unwind() -> None:
 
 
 def test_raise_from_records_both_exceptions_as_distinct_origins() -> None:
-    """`raise ... from` -- two different exception objects, two origins.
+    """`raise ... from` -- two different exception objects, two origins, now linked.
 
     The KeyError is born, then the RuntimeError is born while handling it. Both are
-    origins; neither is propagation of the other. The `__cause__` LINK between them
-    is not recorded today -- see the module note in events.py and issue for day 29.
+    origins; neither is propagation of the other. Since day 29 (#11) the `__cause__`
+    link IS recorded: the RuntimeError's origin RAISE points `exc_cause_seq` back at the
+    KeyError's origin. Python also sets `__context__` in this case, so both links are set.
     """
     events, rec = _record_example("raise_from")
+    raises = [e for e in events if e.kind is EventKind.RAISE]
     assert _exc_names(events, rec, EventKind.RAISE) == ["KeyError", "RuntimeError"]
+    key, runtime = raises
+    assert runtime.exc_cause_seq == key.seq, "the __cause__ link back to the KeyError"
+    assert runtime.exc_context_seq == key.seq, "raise-from sets __context__ too"
+    assert key.exc_cause_seq is None and key.exc_context_seq is None, "the root has no link"
 
 
 def test_implicit_context_also_yields_two_origins() -> None:
-    """`__context__` chaining. Same event shape as `raise from`; the link differs."""
+    """`__context__` chaining: no explicit `from`, so only the context link is set.
+
+    This is the case the in-flight stack could not recover -- the KeyError is marked
+    handled before the RuntimeError is raised -- so it proves the recorder's id->raise-seq
+    map, not adjacency, is what links the two.
+    """
     events, rec = _record_example("implicit_context")
+    raises = [e for e in events if e.kind is EventKind.RAISE]
     assert _exc_names(events, rec, EventKind.RAISE) == ["KeyError", "RuntimeError"]
+    key, runtime = raises
+    assert runtime.exc_context_seq == key.seq, "the __context__ link back to the KeyError"
+    assert runtime.exc_cause_seq is None, "no explicit `from`, so no __cause__ link"
 
 
 def test_exception_frames_still_balance() -> None:

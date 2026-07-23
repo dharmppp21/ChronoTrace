@@ -159,6 +159,17 @@ class Event:
             interns to a small int, which is exactly what day 12's columnar
             encoder wants. The message is a value and belongs to day 7's capture,
             not to a second string field here.
+        exc_cause_seq: the `seq` of the origin RAISE of this exception's
+            ``__cause__`` -- i.e. `raise X from Y`, where Y was itself recorded.
+            Origin RAISE only; None if there is no explicit cause or the cause was
+            raised in unrecorded code. This is what makes an exception *chain*
+            traversable: the recorder observes the object link the traceback shows
+            as "The above exception was the direct cause..." (day 29, issue #11).
+        exc_context_seq: the `seq` of the origin RAISE of this exception's
+            ``__context__`` -- an exception raised *while handling* another. Origin
+            RAISE only; None otherwise. Distinct from `exc_cause_seq` because Python
+            distinguishes explicit (`from`) chaining from implicit, and a debugger
+            should show which it was rather than collapse them.
     """
 
     seq: int
@@ -171,3 +182,5 @@ class Event:
     name_id: int | None = None
     value_ref: ValueRef | None = None
     exc_type_id: int | None = None
+    exc_cause_seq: int | None = None
+    exc_context_seq: int | None = None

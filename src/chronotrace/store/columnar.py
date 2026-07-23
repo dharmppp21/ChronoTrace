@@ -8,9 +8,12 @@ compressor (zstd, day 14) crushes -- `seq` deltas to a run of ones, `kind` to a
 handful of runs, `code_id` stays constant while execution sits in one function.
 Measured 7-12x smaller than row before zstd even runs.
 
-Payload layout (spec §6.3): `u32 event_count`, then ten columns in the field order
-of `Event`, each `[u8 codec][u32 byte_length][bytes]`. A `None` field is stored as
-`-1` (`name_id`/`value_ref`/`exc_type_id` are otherwise non-negative indices).
+Payload layout (spec §6.3): `u32 event_count`, `u16 ncols` (format 1.7+), then `ncols`
+columns in the field order of `Event`, each `[u8 codec][u32 byte_length][bytes]`. A
+`None` field is stored as `-1` (the optional id/seq fields are otherwise non-negative).
+The self-describing `ncols` is what lets a future column be appended with no decoder
+change (see `NCOLS_MINOR`); a pre-1.7 payload has no `ncols` and is read as `LEGACY_NCOLS`
+columns, its later fields defaulting to `None`.
 
 Codec choice is per column and automatic: encode tries all three and keeps the
 smallest, so no hand-tuned per-field policy can be wrong for unexpected data -- and
@@ -40,6 +43,9 @@ from chronotrace.recorder.events import Event, EventKind
 from chronotrace.recorder.values import ValueRef
 
 # Field order is the on-disk column order and must match the spec. `None` -> -1.
+# APPEND-ONLY: a new column goes at the end, never in the middle, so an older reader
+# that reads only the columns it knows still reads the earlier ones by position. The
+# self-describing `ncols` prefix (format 1.7) is what lets that work in both directions.
 _FIELDS = (
     "seq",
     "kind",
@@ -51,10 +57,25 @@ _FIELDS = (
     "name_id",
     "value_ref",
     "exc_type_id",
+    "exc_cause_seq",  # 1.7: origin RAISE's __cause__ link (day 29, #11)
+    "exc_context_seq",  # 1.7: origin RAISE's __context__ link
 )
+
+LEGACY_NCOLS = 10
+"""Column count of an EVENTS payload written before format 1.7, which carried no
+self-describing `ncols`. A 1.6-or-older file is decoded as exactly these ten columns;
+the two exception-chain columns are absent and read back as `None`."""
+
+NCOLS_MINOR = 7
+"""From format 1.7 the EVENTS payload self-describes its column count (a u16 after the
+event count). That is the whole forward-compatibility story for event columns: a future
+minor can append a column and *no reader changes* -- an older reader reads the columns it
+knows and ignores the rest, a newer reader reads old files by their declared (or legacy)
+count. Adding a column never again touches this decoder."""
 
 _HOST_LE = sys.byteorder == "little"
 _COUNT = struct.Struct("<I")
+_NCOLS = struct.Struct("<H")  # 1.7+: column count, right after the event count
 _COL_HEADER = struct.Struct("<B I")  # codec, byte_length
 
 COUNT_SIZE = _COUNT.size  # 4; the u32 event-count prefix. Kept uncompressed by the
@@ -196,12 +217,16 @@ def unpack_columns(
 
 
 def encode_events(events: list[Event]) -> bytes:
-    """Encode a batch of events as an EVENTS block payload.
+    """Encode a batch of events as an EVENTS block payload (format 1.7).
+
+    Layout: `u32 event_count`, `u16 ncols`, then `ncols` columns. The count stays first
+    and uncompressed so the writer can keep it out of the compression frame (`peek_count`);
+    the self-describing `ncols` lets any future column be appended without a decoder change.
 
     Complexity: O(fields x events) -- three linear codec passes per column.
     """
     columns = [[_field_int(e, field) for e in events] for field in _FIELDS]
-    return _COUNT.pack(len(events)) + pack_columns(columns)
+    return _COUNT.pack(len(events)) + _NCOLS.pack(len(_FIELDS)) + pack_columns(columns)
 
 
 def peek_count(buf: object, payload_offset: int) -> int:
@@ -219,8 +244,14 @@ def peek_count(buf: object, payload_offset: int) -> int:
     return int(_COUNT.unpack_from(buf, payload_offset)[0])  # type: ignore[arg-type]
 
 
-def decode_events(payload: bytes) -> list[Event]:
+def decode_events(payload: bytes, minor: int) -> list[Event]:
     """Inverse of `encode_events`. Reconstructs the exact events, `None`s restored.
+
+    `minor` is the file's format minor version: from `NCOLS_MINOR` the payload declares
+    its own column count, and before it the count was a fixed `LEGACY_NCOLS`. Only the
+    columns this reader knows (`len(_FIELDS)`) are read; extra columns in a *newer* file
+    are ignored, and columns absent from an *older* file read back as `None`. That is the
+    forward- and backward-compatibility this decoder provides for free.
 
     **Parses untrusted input.** A hostile file can carry a valid CRC over malformed
     bytes, so this bounds every allocation the payload requests: the declared event
@@ -238,8 +269,17 @@ def decode_events(payload: bytes) -> list[Event]:
     (count,) = _COUNT.unpack_from(payload, 0)
     if not 0 <= count <= MAX_EVENTS_PER_BLOCK:
         raise ValueError(f"block claims {count} events, over the {MAX_EVENTS_PER_BLOCK} cap")
-    column_list, _pos = unpack_columns(payload, _COUNT.size, len(_FIELDS), count)
-    columns = dict(zip(_FIELDS, column_list, strict=True))
+    pos = _COUNT.size
+    if minor >= NCOLS_MINOR:
+        (stored,) = _NCOLS.unpack_from(payload, pos)
+        pos += _NCOLS.size
+    else:
+        stored = LEGACY_NCOLS
+    # Read only the columns this build understands; a newer file's extra columns are left
+    # unread (and ignored), an older file's missing ones default to None in `_row`.
+    to_read = min(stored, len(_FIELDS))
+    column_list, _pos = unpack_columns(payload, pos, to_read, count)
+    columns = dict(zip(_FIELDS[:to_read], column_list, strict=True))
     return [_row(columns, i) for i in range(count)]
 
 
@@ -252,9 +292,13 @@ def _field_int(event: Event, field: str) -> int:
 
 def _row(columns: dict[str, list[int]], i: int) -> Event:
     def opt(field: str) -> int | None:
-        v = columns[field][i]
+        column = columns.get(field)  # a column absent from an older file reads as None
+        if column is None:
+            return None
+        v = column[i]
         return None if v == -1 else v
 
+    value_ref = opt("value_ref")
     return Event(
         seq=columns["seq"][i],
         kind=EventKind(columns["kind"][i]),
@@ -264,6 +308,8 @@ def _row(columns: dict[str, list[int]], i: int) -> Event:
         code_id=columns["code_id"][i],
         lineno=columns["lineno"][i],
         name_id=opt("name_id"),
-        value_ref=None if columns["value_ref"][i] == -1 else ValueRef(columns["value_ref"][i]),
+        value_ref=None if value_ref is None else ValueRef(value_ref),
         exc_type_id=opt("exc_type_id"),
+        exc_cause_seq=opt("exc_cause_seq"),
+        exc_context_seq=opt("exc_context_seq"),
     )
