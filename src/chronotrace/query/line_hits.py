@@ -35,21 +35,9 @@ them cleanly:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
-from typing import TYPE_CHECKING
 
-from chronotrace.query.types import (
-    PAGE_SIZE,
-    Cursor,
-    Hit,
-    QueryContext,
-    QueryResult,
-    UnknownFile,
-    after_bound,
-)
-
-if TYPE_CHECKING:
-    import sqlite3
+from chronotrace.query._resolve import resolve_file
+from chronotrace.query.types import PAGE_SIZE, Cursor, Hit, QueryContext, QueryResult, after_bound
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,7 +57,7 @@ class LineHitsQuery:
         self, ctx: QueryContext, cursor: Cursor | None = None, *, limit: int = PAGE_SIZE
     ) -> QueryResult:
         """Return one page of hits. Raises `UnknownFile` if the file is not in the recording."""
-        file_id, path = self._resolve_file(ctx.db)
+        file_id, path = resolve_file(ctx.db, self.file)
         after = after_bound(cursor)
         rows = ctx.db.execute(
             "SELECT seq FROM line_hits WHERE file_id = ? AND lineno = ? AND seq > ? "
@@ -78,26 +66,3 @@ class LineHitsQuery:
         ).fetchall()
         hits = [Hit(seq=int(seq), file=path, lineno=self.lineno) for (seq,) in rows]
         return QueryResult.page(hits, limit=limit, partial=ctx.partial)
-
-    def _resolve_file(self, db: sqlite3.Connection) -> tuple[int, str]:
-        """Find the one interned file the user meant, by full path or by basename.
-
-        A bare filename is what a user reading source actually types, so it is accepted --
-        but if two recorded files share that name the question is ambiguous, and guessing
-        one would answer confidently about the wrong file. An exact path always wins over a
-        basename match; an ambiguous basename is rejected with the candidates.
-
-        Raises:
-            UnknownFile: nothing matched, or a bare name matched several files.
-        """
-        rows = db.execute("SELECT file_id, path FROM files").fetchall()
-        exact = [(fid, path) for fid, path in rows if path == self.file]
-        if exact:
-            return exact[0]
-        by_name = [(fid, path) for fid, path in rows if Path(path).name == self.file]
-        if not by_name:
-            raise UnknownFile(f"no file matching {self.file!r} is in this recording")
-        if len(by_name) > 1:
-            paths = ", ".join(sorted(path for _fid, path in by_name))
-            raise UnknownFile(f"{self.file!r} is ambiguous; use a fuller path -- matches: {paths}")
-        return by_name[0]

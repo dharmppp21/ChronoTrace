@@ -11,10 +11,11 @@ It must never know what a query *means* -- only how to turn an id into text.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 from chronotrace.index.var_writes import DELETED
-from chronotrace.query.types import UnknownName
+from chronotrace.query.types import UnknownFile, UnknownName
 
 if TYPE_CHECKING:
     import sqlite3
@@ -48,6 +49,29 @@ def name_id(db: sqlite3.Connection, name: str) -> int:
     if row is None:
         raise UnknownName(f"no variable named {name!r} was recorded")
     return int(row[0])
+
+
+def resolve_file(db: sqlite3.Connection, name: str) -> tuple[int, str]:
+    """The one interned file the user meant, by full path or basename, as `(file_id, path)`.
+
+    A bare filename is what a user reading source types, so it is accepted -- but if two
+    recorded files share it the question is ambiguous, and guessing one would answer about
+    the wrong file. An exact path always wins over a basename match.
+
+    Raises:
+        UnknownFile: nothing matched, or a bare name matched several files.
+    """
+    rows = db.execute("SELECT file_id, path FROM files").fetchall()
+    exact = [(int(fid), path) for fid, path in rows if path == name]
+    if exact:
+        return exact[0]
+    by_name = [(int(fid), path) for fid, path in rows if Path(path).name == name]
+    if not by_name:
+        raise UnknownFile(f"no file matching {name!r} is in this recording")
+    if len(by_name) > 1:
+        paths = ", ".join(sorted(path for _fid, path in by_name))
+        raise UnknownFile(f"{name!r} is ambiguous; use a fuller path -- matches: {paths}")
+    return by_name[0]
 
 
 def frame_location(db: sqlite3.Connection, frame_id: int, cache: dict[int, Location]) -> Location:
