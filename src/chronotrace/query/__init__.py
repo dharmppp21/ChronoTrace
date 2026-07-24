@@ -24,8 +24,10 @@ one, are argued in `types.py` and tracked as issue #13.
 """
 
 from chronotrace.query import registry
+from chronotrace.query.breakpoints import RetroBreakpointQuery
 from chronotrace.query.call_tree import CallersOfQuery, CallTreeQuery
 from chronotrace.query.exception_origin import ExceptionOriginQuery
+from chronotrace.query.expr import Condition, ConditionError, compile_condition
 from chronotrace.query.last_write import LastWriteBeforeQuery
 from chronotrace.query.line_hits import LineHitsQuery
 from chronotrace.query.provenance import ValueProvenanceQuery
@@ -42,11 +44,14 @@ from chronotrace.query.types import (
     UnknownName,
 )
 from chronotrace.query.var_writes import VarWritesQuery
+from chronotrace.query.watch import WatchQuery
 
 __all__ = [
     "PAGE_SIZE",
     "CallTreeQuery",
     "CallersOfQuery",
+    "Condition",
+    "ConditionError",
     "Cursor",
     "ExceptionOriginQuery",
     "Hit",
@@ -56,10 +61,13 @@ __all__ = [
     "QueryContext",
     "QueryError",
     "QueryResult",
+    "RetroBreakpointQuery",
     "UnknownFile",
     "UnknownFunction",
     "UnknownName",
     "ValueProvenanceQuery",
     "VarWritesQuery",
+    "WatchQuery",
+    "compile_condition",
     "registry",
 ]

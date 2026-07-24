@@ -93,10 +93,15 @@ recording is not the end of the program, and a debugger that conflates them lies
 from __future__ import annotations
 
 import enum
-from collections.abc import Callable
+from typing import TYPE_CHECKING
 
+from chronotrace.index.line_hits import previous_hit
 from chronotrace.recorder.events import Event, EventKind
 from chronotrace.store import ChronoReader
+
+if TYPE_CHECKING:
+    import sqlite3
+    from collections.abc import Callable, Iterable
 
 # Kept as module constants so "how a frame begins and ends" is stated once, and a future
 # kind (an await point, a breakpoint event) changes one line rather than four call sites.
@@ -166,8 +171,12 @@ def seek(
     # routes through here, so that upgrade is one function rather than four. The ceiling
     # is real and measured -- a `step_over_back` in a module-level frame scans 281k events
     # and costs 0.63 s. A faster scan is deliberately NOT the fix: iterating decoded blocks
-    # would still leave ~126 ms, four times over a frame budget. Only day 30's index, which
-    # answers "previous LINE in frame F" as a lookup, actually solves it.
+    # would still leave ~126 ms, four times over a frame budget.
+    # Day 30 closed HALF of this: reverse-continue to a breakpoint is now `continue_back`,
+    # an indexed lookup, because a breakpoint is a (file, line) the day-27 line index answers.
+    # `step_over_back`'s predicate is "previous LINE in *this frame*", which that index does
+    # not answer (it is keyed by file:line, not frame), so it still scans here -- the open
+    # remainder of #5, needing a per-frame line index.
     end = len(reader)
     if not 0 <= seq < end:
         raise IndexError(f"seq {seq} out of range [0, {end})")
@@ -179,6 +188,39 @@ def seek(
     if direction is Direction.BACKWARD:
         return Edge.BEGINNING
     return Edge.LOST_TAIL if reader.truncated else Edge.END
+
+
+def continue_back(
+    db: sqlite3.Connection, breakpoints: Iterable[tuple[int, int]], seq: int
+) -> StepResult:
+    """Reverse-continue: the nearest instant *before* `seq` where any breakpoint's line ran.
+
+    This closes the day-21 linear scan for reverse-continue (issue #5). The generic `seek`
+    above walks events one at a time -- correct, but O(distance), and a reverse-continue over
+    a rarely-hit breakpoint scanned to the start of the recording. A breakpoint is a
+    `(file, line)`, and the day-27 line index answers "the previous hit of this line before
+    `seq`" as a descending B-tree seek, so this is O(B log n) for B breakpoints -- the max of
+    each breakpoint's previous hit.
+
+    `seek` stays for step/step-over/step-out, whose predicates ("previous LINE in *this
+    frame*") the line index does not answer; that remaining scan is the open part of #5.
+
+    Args:
+        db: an open index connection (this is the one stepping operation that is index-backed,
+            so unlike its siblings it takes the index rather than only the reader).
+        breakpoints: `(file_id, lineno)` pairs -- already resolved, since name resolution is a
+            query-layer concern and this is the reconstruct layer.
+        seq: the instant to reverse-continue from. Excluded, like every step.
+
+    Returns:
+        The destination `seq`, or `Edge.BEGINNING` if no breakpoint was ever hit before `seq`.
+    """
+    best: int | None = None
+    for file_id, lineno in breakpoints:
+        hit = previous_hit(db, file_id, lineno, seq)
+        if hit is not None and (best is None or hit > best):
+            best = hit
+    return best if best is not None else Edge.BEGINNING
 
 
 def step(reader: ChronoReader, seq: int, direction: Direction = Direction.FORWARD) -> StepResult:

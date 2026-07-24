@@ -68,6 +68,14 @@ _QUERIES: dict[str, _Entry] = {
         "chronotrace.query.call_tree:CallTreeQuery",
         "the direct children of a frame, in call order",
     ),
+    "break": _Entry(
+        "chronotrace.query.breakpoints:RetroBreakpointQuery",
+        "every hit of a line -- a retroactive breakpoint, optionally conditional",
+    ),
+    "watch": _Entry(
+        "chronotrace.query.watch:WatchQuery",
+        "every instant a variable changed, old -> new",
+    ),
 }
 
 
