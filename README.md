@@ -107,6 +107,36 @@ you `None`:
 result is not bound in this frame at seq 26
 ```
 
+## Retroactive breakpoints
+
+Set a breakpoint **after the program has already finished**, and instantly see every time
+it would have hit. No re-running — there is nothing left to run. This is the thing `pdb`
+structurally cannot do, and the end of the "I put the breakpoint in the wrong place, run it
+again" loop.
+
+```bash
+chronotrace query run.chrono --break pipeline.py:42            # every hit of line 42
+chronotrace query run.chrono --break pipeline.py:42 --if "i > 100"   # only where i > 100
+```
+
+The condition is **never `eval`'d.** It is user-supplied source, so it is parsed and walked
+by a restricted evaluator over a whitelisted grammar — no calls, imports, lambdas, or dunder
+access, all rejected at parse. And it evaluates over *captured data*, not live objects, so
+there is nothing dangerous for it to reach in the first place. Two properties it will not
+give up:
+
+- **It matches a live debugger exactly.** A test runs the program under a real `pdb`
+  conditional breakpoint and asserts ChronoTrace's retroactive hits are the identical set —
+  the breakpoint you set afterwards finds precisely what the breakpoint you set beforehand
+  would have.
+- **It never lies about what it could not see.** A hit where the condition needed a value the
+  recording only summarised (a truncated list, a redacted secret) is returned flagged
+  *unknown*, never silently answered `false`.
+
+Watchpoints come free from the same index — `--watch total` shows every change as
+`old -> new` — and reverse-continue to a breakpoint is an indexed lookup, measured **217×**
+faster than the old linear scan. **[Full reference →](docs/queries.md)**
+
 ## What works today
 
 ```bash

@@ -173,6 +173,60 @@ chronotrace query run.chrono --callers-of Parser.parse
 chronotrace query run.chrono --call-tree 7
 ```
 
+### `break` — retroactive breakpoints
+
+`RetroBreakpointQuery(file, lineno, condition=None)`
+
+**Set a breakpoint after the program has already finished, and see every time it would have
+hit — without re-running.** No `pdb` can do this, because there is nothing left to run. It
+is the query that most clearly cannot be replicated by a live debugger, and the answer to
+everyone who has lived the "I put the breakpoint in the wrong place, run it again" loop.
+
+```bash
+chronotrace query run.chrono --break app.py:42
+chronotrace query run.chrono --break app.py:42 --if "i > 100"
+```
+
+Unconditionally, it is every hit of the line (the day-27 line index). **Conditionally**, it
+is only the hits where the condition held — and the condition is evaluated properly:
+
+- **The condition is never `eval`'d.** It is user-supplied source, so it is parsed and walked
+  by a restricted evaluator (`expr.py`) over a whitelisted grammar (comparisons, boolean and
+  arithmetic ops, literals, names, index and attribute access). Calls, imports, lambdas,
+  comprehensions, the walrus, f-strings, and underscore/dunder access are rejected at parse.
+  The evaluator runs over *captured data*, not live objects, so there is nothing dangerous to
+  reach even if it did.
+- **Fast on ten thousand hits.** The condition's value only changes when one of its variables
+  changes, so a hit where none did carries the previous answer forward (predicate pushdown);
+  candidates are reconstructed sequentially through the locality cache; and the first page
+  returns after its `limit` matches, not after evaluating them all.
+- **Honest about truncation.** A hit where the condition needed a value the recording only
+  summarised — a truncated list, a redacted secret, a name out of scope — is returned
+  **flagged UNKNOWN**, never silently dropped. *A conditional breakpoint that answered `false`
+  for a value it could not see would be lying.*
+- **Instant semantics.** The condition is evaluated in the frame's namespace *on arrival* at
+  the line (parameters and prior locals bound, the line's own assignment not yet made) —
+  exactly what a `pdb` conditional breakpoint sees. A test asserts the retroactive hits are
+  identical to a live `pdb` breakpoint's, for the same condition.
+
+### `watch` — watchpoints
+
+`WatchQuery(name, frame_id=None, changed_to=…, changed_from=…)`
+
+Every instant a variable changed, as `old -> new`. Free from the day-8 change detection: the
+recorder already emits a write only when a value actually changes, so the change history *is*
+the index. `--changed-to` / `--changed-from` filter by the new / old value, and are honest
+about truncation — a summarised value cannot be confirmed equal, so it is not matched.
+
+```bash
+chronotrace query run.chrono --watch total
+chronotrace query run.chrono --watch total --changed-to 0
+```
+
+Reverse-continue (`continue_back`, the stepping primitive) is now an indexed lookup too — the
+previous hit of any breakpoint before an instant, O(B·log n) instead of the day-21 linear
+scan (measured **217× faster** on an 18k-event recording, and the gap widens with size).
+
 [#11]: https://github.com/dharmppp21/ChronoTrace/issues/11
 
 ## Pagination

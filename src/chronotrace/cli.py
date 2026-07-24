@@ -15,6 +15,7 @@ the recorder's process would then carry (see the zero-deps note in pyproject.tom
 from __future__ import annotations
 
 import argparse
+import ast
 import hashlib
 import io
 import os
@@ -22,6 +23,7 @@ import runpy
 import sys
 from collections.abc import Iterable
 from pathlib import Path
+from typing import Any
 
 from chronotrace.config import RecorderConfig, find_pyproject, load_config
 from chronotrace.index import Progress, build_index
@@ -38,10 +40,13 @@ from chronotrace.query import (
     QueryContext,
     QueryError,
     QueryResult,
+    RetroBreakpointQuery,
     ValueProvenanceQuery,
     VarWritesQuery,
+    WatchQuery,
     registry,
 )
+from chronotrace.query.watch import ANY as WATCH_ANY
 from chronotrace.recorder import MemorySink, Recorder
 from chronotrace.recorder.redact import Redactor
 from chronotrace.recorder.scope import Scope
@@ -100,6 +105,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     qry.add_argument("--callers-of", metavar="FUNC", help="every invocation of function FUNC")
     qry.add_argument("--call-tree", type=int, metavar="FRAME", help="the direct children of FRAME")
+    qry.add_argument("--break", dest="brk", metavar="FILE:LINE", help="retroactive breakpoint")
+    qry.add_argument(
+        "--if", dest="cond", metavar="COND", help="condition for --break (e.g. 'i > 100')"
+    )
+    qry.add_argument("--watch", metavar="NAME", help="every instant NAME changed, old -> new")
+    qry.add_argument("--changed-to", metavar="VALUE", help="filter --watch to changes to VALUE")
+    qry.add_argument("--changed-from", metavar="VALUE", help="filter --watch to changes from VALUE")
     qry.add_argument("--frame", type=int, metavar="ID", help="scope --var-writes to one frame")
     qry.add_argument("--before", type=int, metavar="SEQ", help="only writes strictly before SEQ")
     qry.add_argument("--after", type=int, metavar="SEQ", help="resume paging after this instant")
@@ -363,20 +375,17 @@ def _build_query(args: argparse.Namespace) -> Query:
             ("--exception-origin", args.exception_origin),
             ("--callers-of", args.callers_of),
             ("--call-tree", args.call_tree),
+            ("--break", args.brk),
+            ("--watch", args.watch),
         )
         if value is not None
     }
     if len(given) != 1:
-        raise ValueError("give exactly one query flag (e.g. --var-writes, --provenance)")
+        raise ValueError("give exactly one query flag (e.g. --var-writes, --break, --watch)")
     if args.var_writes is not None:
         return VarWritesQuery(name=args.var_writes, frame_id=args.frame, before_seq=args.before)
     if args.line_hits is not None:
-        file, sep, line = args.line_hits.rpartition(":")
-        if not sep or not line.isdigit():
-            raise ValueError(
-                f"--line-hits wants FILE:LINE, e.g. app.py:42 (got {args.line_hits!r})"
-            )
-        return LineHitsQuery(file=file, lineno=int(line))
+        return LineHitsQuery(*_file_line("--line-hits", args.line_hits))
     if args.last_write is not None:
         name, seq = _name_at_seq("--last-write", args.last_write)
         return LastWriteBeforeQuery(name=name, seq=seq, frame_id=args.frame)
@@ -387,7 +396,35 @@ def _build_query(args: argparse.Namespace) -> Query:
         return ExceptionOriginQuery(seq=args.exception_origin)
     if args.callers_of is not None:
         return CallersOfQuery(function=args.callers_of)
-    return CallTreeQuery(frame_id=args.call_tree)
+    if args.call_tree is not None:
+        return CallTreeQuery(frame_id=args.call_tree)
+    if args.brk is not None:
+        file, line = _file_line("--break", args.brk)
+        return RetroBreakpointQuery(file=file, lineno=line, condition=args.cond)
+    return WatchQuery(
+        name=args.watch,
+        frame_id=args.frame,
+        changed_to=_literal("--changed-to", args.changed_to),
+        changed_from=_literal("--changed-from", args.changed_from),
+    )
+
+
+def _file_line(flag: str, value: str) -> tuple[str, int]:
+    """Parse a `FILE:LINE` argument (splitting on the last colon, so Windows paths work)."""
+    file, sep, line = value.rpartition(":")
+    if not sep or not line.isdigit():
+        raise ValueError(f"{flag} wants FILE:LINE, e.g. app.py:42 (got {value!r})")
+    return file, int(line)
+
+
+def _literal(flag: str, value: str | None) -> Any:
+    """Parse a `--changed-*` filter value as a Python literal, or `ANY` when absent."""
+    if value is None:
+        return WATCH_ANY
+    try:
+        return ast.literal_eval(value)
+    except (ValueError, SyntaxError) as exc:
+        raise ValueError(f"{flag} wants a literal (a number, 'string', True, None): {exc}") from exc
 
 
 def _name_at_seq(flag: str, value: str) -> tuple[str, int]:
@@ -467,10 +504,18 @@ def _empty_note(args: argparse.Namespace) -> str:
             f"chronotrace: {args.callers_of!r} was recorded but not called"
             " in the range you asked for."
         )
-    return (
-        f"chronotrace: frame {args.call_tree} has no recorded children -- a leaf call, or the "
-        "frame id is not one this recording assigned."
-    )
+    if args.call_tree is not None:
+        return (
+            f"chronotrace: frame {args.call_tree} has no recorded children -- a leaf call, or "
+            "the frame id is not one this recording assigned."
+        )
+    if args.brk is not None:
+        cond = f" where {args.cond}" if args.cond else ""
+        return (
+            f"chronotrace: {args.brk}{cond} -- the breakpoint was never hit"
+            " in the range you asked for."
+        )
+    return f"chronotrace: {args.watch} never changed in the range you asked for."
 
 
 def record_command(args: argparse.Namespace) -> int:
