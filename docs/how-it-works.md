@@ -74,7 +74,7 @@ The obvious model for "which function are we in" is a stack. It is wrong for Pyt
 ```python
 def numbers(n):
     for i in range(n):
-        yield i           # leaves the frame without exiting it
+        yield i  # leaves the frame without exiting it
 ```
 
 A generator is entered, *leaves without exiting*, and re-enters later — possibly

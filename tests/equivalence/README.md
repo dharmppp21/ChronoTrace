@@ -113,6 +113,7 @@ Then shrink it:
 
 ```python
 from tests.equivalence.minimise import harness_oracle, minimise
+
 print(minimise(source, harness_oracle(tmp_path, mismatch)))
 ```
 
