@@ -72,8 +72,9 @@ names in this diagram.
 | store | **done (M2, day 18)** — writer + reader + zstd + value pool + keyframes + deltas + crash recovery, defaults tuned by grid ([`docs/format-spec.md`](format-spec.md), [ADR-0005](adr/0005-storage-defaults.md)) | days 11–18 |
 | reconstruct | **done (M3, day 24)** — `reconstruct(seq)` in O(log K), backward stepping, replay-equivalence referee ([ADR-0006](adr/0006-reconstruction.md)) | days 19–24 |
 | index | **built** ([ADR-0008](adr/0008-index-schema.md)) — one-pass driver, five indexers: var writes, line hits, call tree, exceptions, density | days 25–27 |
-| query | **begun** — typed API, injected context, cursor pagination, a stated latency contract; `var-writes` and `line-hits` queries | days 28–31 |
-| server, frontend | planned | phases 4–5 |
+| query | **done (M4, `v0.4.0-query`)** — typed engine, retroactive/conditional breakpoints, exception origin + chains, provenance, watchpoints, cursor pagination, an asserted latency contract | days 28–31 |
+| server | **contract designed** ([ADR-0010](adr/0010-api-contract.md)) — versioned DTOs, endpoints from screens, immutable caching, localhost-only; the server lands day 33 | day 32 |
+| frontend | planned — a scrubber, not an IDE ([ADR-0011](adr/0011-phase5-scope.md)) | phase 5 |
 
 ## The storage format
 
@@ -158,6 +159,22 @@ Three decisions carry the layer, each argued in `src/chronotrace/query/types.py`
 Results are honest about their edges: a partial (crash-truncated) recording flags every
 result `partial` rather than silently under-reporting, and a typo (`no such variable`, `no
 such file`) is a different, louder answer than a valid query that found nothing.
+
+## The server contract: DTOs, never storage types
+
+Phase 5 makes the engine *seeable* over a small local HTTP API. Its one load-bearing rule is
+the dependency arrow at its most dangerous edge: **a storage type never reaches the wire.**
+The server serialises the explicit DTOs in `server/dto.py` — the resolved, display-ready form
+of an engine answer, where a `ProgramState`'s `name_id -> value_ref` becomes a `Frame`'s
+`name -> "preview"` — and never a `ProgramState`, `Delta`, or `CapturedValue` itself. Leak one
+and the on-disk format becomes the wire format becomes the public API, and three things that
+must stay free to change are welded into one that cannot. The rule is enforced the same way
+every layer boundary is: by a test that walks the DTO type graph and fails if any storage type
+is reachable (`tests/server/test_dto.py`). Endpoints are derived from the five screens, not the
+engine's capabilities; the hot one, `/state?seq=`, ships value *previews* and expands on click
+(day-20 lazy resolution over HTTP); immutable recordings cache forever; and the server binds
+loopback, because a recording is program memory. Contract: [ADR-0010](adr/0010-api-contract.md);
+scope (a scrubber, not an IDE): [ADR-0011](adr/0011-phase5-scope.md).
 
 ## How correctness is established
 

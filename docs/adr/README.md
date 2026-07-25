@@ -50,6 +50,9 @@ the project: read in order, it explains how each decision forced the next.
 | [0006](0006-reconstruction.md) | Reconstruction: keyframe + bounded delta replay, O(1) backward via inversion | Accepted |
 | [0007](0007-halfway-review.md) | The halfway review: what drifted, what to build differently, and the scope boundary | Accepted |
 | [0008](0008-index-schema.md) | The index: SQLite sidecar, built after recording, every index justified by a named query | Accepted |
+| [0009](0009-dogfooding-findings.md) | Dogfooding (checkpoint 4): three unseen bugs debugged with queries, the gap list, and where `pdb` wins | Accepted |
+| [0010](0010-api-contract.md) | The HTTP contract: DTOs never leak storage types, endpoints from screens, immutable caching, localhost-only | Accepted |
+| [0011](0011-phase5-scope.md) | Phase 5 ships a scrubber, not an IDE — the explicit non-goals | Accepted |
 
 ## Baseline decisions not recorded here
 
