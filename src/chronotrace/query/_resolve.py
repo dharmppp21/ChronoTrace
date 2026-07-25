@@ -88,7 +88,7 @@ def line_of(ctx: QueryContext, seq: int) -> int:
 
 
 def value_preview(ctx: QueryContext, value_ref: int) -> str | None:
-    """A short `repr` of a written value -- `<deleted>` for a `del`, None if the pool lost it.
+    """A short, Python-shaped preview of a written value -- `<deleted>` for a `del`, None if lost.
 
     A `del x` is stored as a row with no value (day 24) and is a real answer to "who wrote
     x", so it is shown, not skipped. A value the pool has lost is a corrupt recording, not a
@@ -99,7 +99,44 @@ def value_preview(ctx: QueryContext, value_ref: int) -> str | None:
     from chronotrace.reconstruct import MissingValue
 
     try:
-        text = repr(ctx.resolver.resolve(value_ref))
+        text = render_captured(ctx.resolver.resolve(value_ref))
     except MissingValue:
         return None
     return text if len(text) <= MAX_PREVIEW_CHARS else f"{text[:MAX_PREVIEW_CHARS]}..."
+
+
+def render_captured(value: object) -> str:
+    """A captured value as Python-shaped text: `['first']`, not `{'$': 'list', 'items': ...}`.
+
+    The day-7 capture stores containers as tagged dicts so they are pure data; that shape is
+    right on disk and wrong on screen. This unwraps it back to how the value looked -- the
+    dogfooding session (day 31) showed the raw tag leaking into every result was the single
+    worst readability problem. A truncated container ends in `...`, a summary marker renders
+    as `<budget>`/`<cycle>`, so the preview never pretends to be complete when it is not.
+    """
+    if not (isinstance(value, dict) and "$" in value):
+        return repr(value)  # an atom: int, str, bool, None -- captured unwrapped
+    tag = value["$"]
+    if tag in _SUMMARY:
+        return f"<{tag}>"
+    if tag == "dict":
+        body = ", ".join(f"{render_captured(k)}: {render_captured(v)}" for k, v in value["items"])
+        return "{" + _ellipsis(body, value) + "}"
+    if tag in _SEQ:
+        return _SEQ[tag] % _ellipsis(", ".join(render_captured(v) for v in value["items"]), value)
+    if tag == "bytes" and "v" in value:
+        return repr(bytes.fromhex(value["v"]))  # a short bytes value, captured whole
+    if tag in ("str", "bytes"):
+        return f"{value['head']!r}...({value['len']} {tag})"  # a truncated string/bytes prefix
+    return f"{value.get('type', tag)}(...)"  # an object: its type, state elided
+
+
+_SUMMARY = frozenset({"budget", "depth", "cycle", "redacted"})
+_SEQ = {"list": "[%s]", "tuple": "(%s)", "set": "{%s}", "frozenset": "frozenset({%s})"}
+
+
+def _ellipsis(body: str, value: dict[str, object]) -> str:
+    """The rendered items, with a trailing `...` when the container was truncated."""
+    if not value.get("truncated"):
+        return body
+    return f"{body}, ..." if body else "..."
