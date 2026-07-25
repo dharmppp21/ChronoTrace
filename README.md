@@ -137,6 +137,29 @@ Watchpoints come free from the same index — `--watch total` shows every change
 `old -> new` — and reverse-continue to a breakpoint is an indexed lookup, measured **217×**
 faster than the old linear scan. **[Full reference →](docs/queries.md)**
 
+## ChronoTrace vs `pdb`
+
+Three bugs it had never seen — an off-by-one, a mutable default argument, a late-binding
+closure — were each debugged with **one or two queries**, no prints and no re-running
+([the session, step by step](docs/tutorial.md)). But a tool author who knows exactly where
+their tool loses is more credible than one who claims it always wins:
+
+| | `pdb` | ChronoTrace |
+|---|---|---|
+| **move a breakpoint after the fact** | re-run the program | one query, nothing re-runs |
+| **the whole history of a variable** | step and watch, iteration by iteration | `--watch x` — every change at once |
+| **cause far in the past from the symptom** | guess where to break, repeat | `--provenance`, `--exception-origin` jump straight there |
+| **a flaky bug** | may not reproduce this run | recorded once, replays deterministically |
+| **attach to a running / production process** | ✅ its home turf | ✗ needs a recording first |
+| **zero setup, zero overhead** | ✅ | ✗ record step + a few % while recording |
+| **interactive poking around** | ✅ a live REPL in the frame | partly — `chronotrace step`, but not arbitrary eval |
+| **threads racing, C-extension internals, memory bugs** | ✅ sees the live machine | ✗ only what the events recorded |
+
+The rule of thumb: ChronoTrace wins on **state and causal questions**, especially when the
+mistake and the symptom are far apart in time — the loop of "re-run and break earlier" is
+the thing it removes. Reach for `pdb` when you need to be *inside a live process*, or the bug
+lives somewhere the recording does not reach.
+
 ## What works today
 
 ```bash

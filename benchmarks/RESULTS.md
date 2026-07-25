@@ -882,6 +882,37 @@ either way), and the clustered form still beats both on time and size.
 
 ---
 
+## Days 28–31 — Phase 4 (M4): the query engine, measured
+
+The query layer is built on the day-26/27 SQLite index, so its latencies are the index's
+lookups plus bounded per-page enrichment. The load-bearing numbers:
+
+| query | complexity | measured | day |
+|---|---|---:|---|
+| last-write-before (the demo primitive) | O(log n) clustered seek | **91 µs** at 281k events | 26 |
+| var-writes / line-hits page | O(log n + page) | p95 **< 50 ms at 10M events** (contract, asserted) | 28 |
+| exception origin + chain walk | O(chain) primary-key lookups | microseconds (short chains) | 29 |
+| provenance (exact write) | O(log n) | as last-write-before | 29 |
+| conditional breakpoint | pushdown + O(candidates evaluated) | bounded by matches per page, not hits | 30 |
+| **reverse-continue** (`continue_back`) | O(B log n) vs O(distance) scan | **35.8 µs vs 7,766 µs = 217×** at 18k events | 30 |
+
+The reverse-continue speedup **widens with recording size** (the scan is O(n), the index
+O(log n)); 217× is the figure at a modest 18k events. The conditional-breakpoint cost is the
+point of the pushdown: a hit where no condition variable changed carries the previous answer
+forward, so the count of *reconstructions* is the number of relevant changes, not the number
+of hits — a line hit ten thousand times with a rarely-changing condition reconstructs a
+handful of times per page.
+
+No regression >10% against Checkpoints 1–3: the query layer adds a sidecar and reads it; it
+does not touch the record or reconstruct hot paths, whose day-24 numbers stand. The index is
+derived state (durability off), built at **~240k events/s** single-pass (day 27, 3.2× over
+five separate passes).
+
+The evaluator is not `eval`: conditions are parsed, whitelisted, and walked over captured
+*data*, so a condition string carries zero code-execution risk (day 30, `test_expr_security`).
+That is a correctness/security property, not a speed one, but it is the one that lets a
+condition arrive over an HTTP request on day 34 without becoming an RCE.
+
 ## Standing budgets
 
 | thing | budget | current | measured |
