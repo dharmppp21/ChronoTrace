@@ -6,7 +6,9 @@ script.py` records it and drops into the stepping REPL -- forward *and* backward
 which is the product in its smallest usable form until the UI lands. `chronotrace repair
 rec.chrono` rebuilds the footer of a recording whose writer was killed mid-write, so
 later opens are O(1) again -- and reports the truncation, because a recovered recording
-is incomplete and the user must never be told otherwise.
+is incomplete and the user must never be told otherwise. `chronotrace serve` runs the
+browser API over a directory of recordings (day 33), behind the optional `[ui]` extra so
+recording stays dependency-light.
 
 Stdlib `argparse`, not a CLI framework: a handful of flags do not justify a dependency
 the recorder's process would then carry (see the zero-deps note in pyproject.toml).
@@ -123,6 +125,23 @@ def build_parser() -> argparse.ArgumentParser:
         "--out",
         metavar="FILE",
         help="write the repaired copy here; default swaps the original in place, atomically",
+    )
+
+    srv = sub.add_parser("serve", help="serve the browser API over a directory of recordings")
+    srv.add_argument(
+        "--dir", default=".", metavar="DIR", help="directory of .chrono recordings (default: .)"
+    )
+    srv.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="bind address (default: 127.0.0.1 -- any other value exposes recordings off-machine)",
+    )
+    srv.add_argument("--port", type=int, default=8000, help="bind port (default: 8000)")
+    srv.add_argument(
+        "--ui-origin",
+        action="append",
+        metavar="URL",
+        help="allow this browser origin to read the API (CORS); repeatable",
     )
     return parser
 
@@ -547,11 +566,50 @@ def record_command(args: argparse.Namespace) -> int:
     return index_command(str(out)) if args.index else 0
 
 
+def serve_command(args: argparse.Namespace) -> int:
+    """Serve the browser API over `--dir`. Returns an exit code (0 when the server stops).
+
+    FastAPI and uvicorn are imported here, lazily, because they live behind the optional
+    `[ui]` extra -- a user who only records never installs them, and importing the CLI must
+    not require them. A non-loopback `--host` is warned about, not blocked: a recording is
+    the debugged program's memory, so exposing it off-machine is the user's deliberate call,
+    but it must never be a silent one.
+    """
+    try:
+        import uvicorn
+
+        from chronotrace.server.app import ServerConfig, create_app
+    except ModuleNotFoundError as exc:
+        print(  # noqa: T201
+            f"chronotrace: the server needs the optional [ui] extra ({exc.name} is missing). "
+            "Install it with: pip install chronotrace[ui]",
+            file=sys.stderr,
+        )
+        return 1
+    if args.host not in {"127.0.0.1", "localhost", "::1"}:
+        print(  # noqa: T201
+            f"chronotrace: WARNING -- binding {args.host} exposes your recordings (your "
+            "program's memory, secrets included) beyond this machine. 127.0.0.1 is the safe bind.",
+            file=sys.stderr,
+        )
+    config = ServerConfig(
+        recordings_dir=Path(args.dir), allowed_origins=tuple(args.ui_origin or ())
+    )
+    print(  # noqa: T201
+        f"chronotrace: serving {Path(args.dir).resolve()} at "
+        f"http://{args.host}:{args.port} -- interactive docs at /docs"
+    )
+    uvicorn.run(create_app(config), host=args.host, port=args.port)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     """Parse arguments and dispatch to the chosen subcommand. Returns a process exit code."""
     args = build_parser().parse_args(argv)
     if args.command == "repair":
         return repair_recording(args.file, args.out)
+    if args.command == "serve":
+        return serve_command(args)
     if args.command == "step":
         return step_command(args)
     if args.command == "index":

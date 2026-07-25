@@ -188,6 +188,28 @@ reader, reconstruction — not a shortcut. `chronotrace step rec.chrono` opens a
 recording, but renders numeric ids instead of names: the format does not yet persist
 its intern tables ([#6](https://github.com/dharmppp21/ChronoTrace/issues/6)).
 
+## Browse a recording over HTTP
+
+The browser UI (Phase 5) talks to a small local API. It ships behind an optional
+extra, so recording stays dependency-light — install it only if you want to serve:
+
+```bash
+pip install -e ".[ui]"
+chronotrace serve --dir .          # serves every .chrono in the directory
+```
+
+Then time-travel with `curl` (interactive docs at `http://localhost:8000/docs`):
+
+```bash
+curl "localhost:8000/api/sessions"                      # list recordings
+curl "localhost:8000/api/sessions/<id>/state?seq=400"   # reconstructed state at an instant
+```
+
+The server binds `127.0.0.1` only, validates the `Host` header, and locks CORS to the
+UI origin — a recording is your program's memory, and localhost is not a security
+boundary against a malicious web page. See [`docs/api.md`](docs/api.md) and
+[ADR-0010](docs/adr/0010-api-contract.md) for the contract, caching model, and threat model.
+
 ## Overhead, measured not boasted
 
 i5-13450HX, Windows 11, Python 3.14, medians of 5. Full tables and methodology in

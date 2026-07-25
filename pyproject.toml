@@ -64,12 +64,26 @@ Issues = "https://github.com/dharmppp21/ChronoTrace/issues"
 chronotrace = "chronotrace.cli:main"
 
 [project.optional-dependencies]
+# The browser API (day 33). Kept OUT of the core dependencies on purpose: the recorder is
+# imported into the user's process, and a user who only records should install neither a web
+# framework nor an ASGI server. `pip install chronotrace` stays lean; `pip install
+# chronotrace[ui]` adds the server. This is the same import-pollution rule the recorder keeps
+# for zstandard/msgpack (see the dependencies comment above), applied to the web tier.
+#   fastapi  -- routing + the OpenAPI spec generated from the DTOs; no hand-written spec to drift.
+#   uvicorn  -- the ASGI server `chronotrace serve` runs the app on. Standard, boring, correct.
+ui = [
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+]
 dev = [
     "pytest>=8",
     "pytest-cov>=5",
     "ruff>=0.9",
     "mypy>=1.14",
     "hypothesis>=6",
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+    "httpx>=0.27",
 ]
 
 # ---------------------------------------------------------------------------
@@ -135,6 +149,14 @@ ignore = [
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"
+
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI's dependency injection is `param = Depends(...)` / `param = Query(...)` in the
+# default position, by design -- the call is what wires the resource in, and it is evaluated
+# per request, not once at import. So B008 (function-call-in-default-argument), which exists
+# to catch an accidental shared mutable default, does not apply. Naming these is the
+# documented FastAPI + ruff configuration, and it is scoped to exactly these two calls.
+extend-immutable-calls = ["fastapi.Depends", "fastapi.Query"]
 
 [tool.ruff.lint.per-file-ignores]
 # Asserts ARE the test; docstrings on every test function are noise.
