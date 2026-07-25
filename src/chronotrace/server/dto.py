@@ -293,6 +293,7 @@ class ErrorCode(enum.Enum):
     SEQ_OUT_OF_RANGE = "seq_out_of_range"  # 404: pick a seq in [0, event_count)
     NOT_FOUND = "not_found"  # 404: no such session/file
     UNKNOWN_QUERY = "unknown_query"  # 400: no query registered under that name
+    BAD_REQUEST = "bad_request"  # 400: the request is malformed -- bad params or query args
 
 
 @dataclass(frozen=True, slots=True)
@@ -320,6 +321,7 @@ STATUS_FOR: dict[ErrorCode, int] = {
     ErrorCode.SEQ_OUT_OF_RANGE: 404,  # pick a seq in [0, event_count)
     ErrorCode.NOT_FOUND: 404,  # no such session or file
     ErrorCode.UNKNOWN_QUERY: 400,  # no query registered under that name
+    ErrorCode.BAD_REQUEST: 400,  # the request itself is malformed
 }
 """Canonical code -> HTTP status. The mapping is the contract, so it lives with the DTOs and is
 tested exhaustive; the day-33 server reads it rather than hard-coding a status per raise site."""

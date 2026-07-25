@@ -30,7 +30,15 @@ Scope, written down before the UI tempts otherwise (ADR-0011): **Phase 5 ships a
 not an IDE.** No editing, no gutter-breakpoint UI, no multi-session diff, no extension.
 
 Design: [ADR-0010](../../../docs/adr/0010-api-contract.md) (contract),
-[ADR-0011](../../../docs/adr/0011-phase5-scope.md) (non-goals). The server itself lands day 33.
+[ADR-0011](../../../docs/adr/0011-phase5-scope.md) (non-goals). The FastAPI server lands day 33
+in `app.py` (factory + lifespan), `deps.py` (resources), `routes/`, and `errors.py`.
+
+The FastAPI + uvicorn dependencies live behind the optional `[ui]` extra, so a user who only
+records still installs nothing web -- the same import-cleanliness rule the recorder keeps.
+
+The app factory lives in `chronotrace.server.app` (`create_app`, `ServerConfig`); it is
+imported from there lazily -- by the CLI's `serve`, or a test -- so importing this package
+for its `dto` never requires FastAPI to be installed.
 """
 
 from chronotrace.server import dto
