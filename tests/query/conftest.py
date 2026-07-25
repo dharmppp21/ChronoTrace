@@ -28,17 +28,23 @@ EXAMPLES = Path(__file__).parent.parent.parent / "examples"
 
 
 def record_example(tmp_path: Path, module: str, func: str = "main") -> Path:
-    """Record one of `examples/` to a real `.chrono` and return its path (no index yet)."""
+    """Record one of `examples/` to a real `.chrono` and return its path (no index yet).
+
+    `importlib`, not `__import__`, so a dotted submodule (`mystery.off_by_one`) resolves to
+    the submodule rather than the top package.
+    """
+    import importlib
+
     sys.path.insert(0, str(EXAMPLES))
     try:
-        entry = getattr(__import__(module), func)
+        entry = getattr(importlib.import_module(module), func)
     finally:
         sys.path.remove(str(EXAMPLES))
     sink = MemorySink()
     recorder = Recorder(sink, capture_values=True, scope=Scope(roots=[str(EXAMPLES)]))
     with recorder:
         entry()
-    recording = tmp_path / f"{module}_{func}.chrono"
+    recording = tmp_path / f"{module.replace('.', '_')}_{func}.chrono"
     with recording.open("wb") as handle:
         writer = ChronoWriter(handle)
         writer.add_strings(intern_tables(recorder))
