@@ -353,6 +353,25 @@ Not built today: nothing consumes it before day 35, and a second table is a seco
 representation of one fact with freedom to disagree. Tracked as issue #12 with the real
 number and the breaking point, so the UI inherits a measurement instead of an assumption.
 
+## Amendment (day 29) — exception chains, and schema v3
+
+The `exceptions` table gained two columns, `chained_cause_seq` and `chained_context_seq`:
+the recorded `__cause__` / `__context__` links (`raise X from Y`), which let a chained
+exception be walked to its root. They are deliberately *separate* from the existing
+`cause_seq` — `cause_seq` is one exception's propagation journey (RAISE → the frames it
+crossed), the new columns link two *distinct* exception objects. Different questions, so
+different columns, never one overloaded to mean both.
+
+This required going back to the recorder: until day 29 the link between two exception
+objects was never observed (issue #11), which is why §5's original `exceptions` table could
+not carry it. The recorder now records it (format 1.7), the indexer copies it, and
+`SCHEMA_VERSION` is **3** (day 27 took it to 2 for the interning tables and
+`ix_frames_entry`). As always, the bump means the next open discards a v2 index and rebuilds
+— derived state pays for the schema's freedom to change.
+
+The shipped schema is the single source of truth in `index/schema.py`; this ADR describes
+its shape and the decisions behind it, and is reconciled to v3 here as of checkpoint 4.
+
 ## Consequences
 
 **Buys:** the questions debugging is actually made of, as B-tree lookups instead of
