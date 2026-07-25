@@ -45,7 +45,13 @@ import sqlite3
 from collections.abc import Callable
 from pathlib import Path
 
-from chronotrace.index.call_tree import CallTreeIndexer, children_of, descendants_of, live_at
+from chronotrace.index.call_tree import (
+    CallTreeIndexer,
+    children_of,
+    descendants_of,
+    live_at,
+    stack_at,
+)
 from chronotrace.index.density import DensityIndexer, profile
 from chronotrace.index.exceptions import ExceptionIndexer, of_type, origin_of, propagation_of
 from chronotrace.index.indexer import Cancelled, Indexer, Progress, Result, build
@@ -76,6 +82,7 @@ __all__ = [
     "previous_hit",
     "profile",
     "propagation_of",
+    "stack_at",
     "writes_to",
 ]
 

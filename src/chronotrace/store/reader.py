@@ -111,6 +111,7 @@ class ChronoReader:
         "_delta_cache",
         "_file",
         "_keyframes",
+        "_major",
         "_minor",
         "_mmap",
         "_pool",
@@ -138,6 +139,7 @@ class ChronoReader:
         self._blocks: list[_Block] = []
         self._starts: list[int] = []
         self._count = 0
+        self._major = 0  # the file's format major; set by _validate_header, for reporting
         self._minor = 0  # the file's format minor; set by _validate_header, drives decode
         self._truncated = False
         self._values_offset: int | None = None
@@ -189,6 +191,7 @@ class ChronoReader:
                 f"file is format v{major}.{minor}; this reader supports up to "
                 f"v{FORMAT_VERSION_MAJOR}.x -- upgrade ChronoTrace"
             )
+        self._major = int(major)  # reported as the file's format version; see `format_version`
         self._minor = int(minor)  # drives version-aware EVENTS column decoding
 
     def _build_index(self) -> None:
@@ -443,6 +446,15 @@ class ChronoReader:
     def keyframe_count(self) -> int:
         """How many keyframes the recording carries. Zero for a 1.1-or-older file."""
         return len(self._keyframes)
+
+    @property
+    def format_version(self) -> str:
+        """The recording's own format version as `"major.minor"` -- what wrote it.
+
+        The file's version, not this reader's maximum: a 1.6 file opened here reports 1.6.
+        The server surfaces it so the UI can tell a user their recording predates a feature.
+        """
+        return f"{self._major}.{self._minor}"
 
     def nearest_keyframe_at_or_before(self, seq: int) -> Keyframe | None:
         """The nearest keyframe whose `seq` is <= `seq`, decoded, or None if none is.

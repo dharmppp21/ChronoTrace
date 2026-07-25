@@ -161,6 +161,26 @@ def live_at(connection: sqlite3.Connection, seq: int) -> list[tuple[int, int, in
     ]
 
 
+def stack_at(connection: sqlite3.Connection, seq: int) -> list[tuple[int, int, int, int | None]]:
+    """Every frame live at `seq` with its parent: `(frame_id, code_id, entry_seq, parent)`.
+
+    `live_at` plus the `parent_frame_id` the call-stack panel needs to nest the live frames
+    into a tree. Kept separate from `live_at` so that query's callers -- which want liveness
+    only and unpack a 3-tuple -- are not handed a column they discard. Same half-open
+    predicate, same outermost-first order.
+
+    Complexity: O(log n + live) via `ix_frames_entry`, one range scan.
+    """
+    return [
+        (int(f), int(c), int(e), None if p is None else int(p))
+        for f, c, e, p in connection.execute(
+            "SELECT frame_id, code_id, entry_seq, parent_frame_id FROM frames "
+            "WHERE entry_seq <= ? AND (exit_seq > ? OR exit_seq IS NULL) ORDER BY entry_seq",
+            (seq, seq),
+        )
+    ]
+
+
 def children_of(connection: sqlite3.Connection, frame_id: int) -> list[tuple[int, int, int]]:
     """The direct children of `frame_id`, in call order. One level of the tree.
 
