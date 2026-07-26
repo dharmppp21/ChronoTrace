@@ -22,7 +22,11 @@ import hashlib
 import io
 import os
 import runpy
+import socket
+import subprocess
 import sys
+import time
+import webbrowser
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
@@ -52,8 +56,16 @@ from chronotrace.query.watch import ANY as WATCH_ANY
 from chronotrace.recorder import MemorySink, Recorder
 from chronotrace.recorder.redact import Redactor
 from chronotrace.recorder.scope import Scope
+from chronotrace.recorder.sink import Sink
 from chronotrace.repl import Repl
-from chronotrace.store import ChronoError, ChronoReader, ChronoWriter, Strings, repair
+from chronotrace.store import (
+    ChronoError,
+    ChronoReader,
+    ChronoWriter,
+    StreamingFileSink,
+    Strings,
+    repair,
+)
 from chronotrace.store.strings import CodeInfo
 
 
@@ -84,6 +96,14 @@ def build_parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=True,
         help="build the query index after recording (default: on)",
+    )
+    rec.add_argument(
+        "--ui",
+        action="store_true",
+        help="record live: stream to a browser and open it as it fills (needs the [ui] extra)",
+    )
+    rec.add_argument(
+        "--port", type=int, default=8000, help="port for --ui's live server (default: 8000)"
     )
     rec.add_argument("script", help="the Python script to record")
     rec.add_argument("script_args", nargs=argparse.REMAINDER, help="arguments passed to the script")
@@ -147,7 +167,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def record_script(
-    script: str, script_args: list[str], config: RecorderConfig, sink: MemorySink
+    script: str, script_args: list[str], config: RecorderConfig, sink: Sink
 ) -> Recorder:
     """Execute `script` as `__main__` under the recorder, into `sink`.
 
@@ -549,6 +569,9 @@ def record_command(args: argparse.Namespace) -> int:
             "capture_values": args.capture_values,
         },
     )
+    out = (Path(args.out) if args.out else Path(args.script).with_suffix(".chrono")).resolve()
+    if args.ui:
+        return record_ui(args, config, out)
     sink = MemorySink()
     recorder = record_script(args.script, args.script_args, config, sink)
 
@@ -560,10 +583,75 @@ def record_command(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 0
-    out = Path(args.out) if args.out else Path(args.script).with_suffix(".chrono")
     out.write_bytes(_to_chrono(recorder, sink))
     print(f"chronotrace: recorded {count:,} events from {args.script} -> {out}")  # noqa: T201
     return index_command(str(out)) if args.index else 0
+
+
+def record_ui(args: argparse.Namespace, config: RecorderConfig, out: Path) -> int:
+    """Record live: serve the recording as it streams, open a browser, keep serving until Ctrl-C.
+
+    The server runs as a *separate process* rather than a thread, deliberately: the target runs
+    on this process's main thread under `sys.monitoring`, and isolating the server keeps its
+    event loop entirely out of what is being recorded (and off the monitored thread). The two
+    share the recording only through the file on disk -- which a reader may open while the writer
+    holds it, verified on Windows -- so the tail is the whole interface between them.
+
+    The recording streams via `StreamingFileSink`; when the target finishes, its value pool and
+    name tables are finalised (the CLI is the one place that spans both layers), leaving a
+    complete, fully-scrubbable `.chrono`. Until then the live view shows control flow and
+    density -- the detail a scrub needs is written at the end.
+    """
+    try:
+        import uvicorn  # noqa: F401 -- a presence check; the subprocess is what serves
+    except ModuleNotFoundError:
+        print(  # noqa: T201
+            "chronotrace: --ui needs the optional [ui] extra: pip install chronotrace[ui]",
+            file=sys.stderr,
+        )
+        return 1
+    serve = [sys.executable, "-m", "chronotrace.cli", "serve", "--dir", str(out.parent)]
+    serve += ["--port", str(args.port)]
+    server = subprocess.Popen(serve)  # noqa: S603 -- our own CLI, fixed args, no shell
+    try:
+        if not _wait_for_port(args.port):
+            print("chronotrace: the live server did not start in time", file=sys.stderr)  # noqa: T201
+            return 1
+        sink = StreamingFileSink(out)  # creates the file, so the session exists before the browser
+        base = f"http://127.0.0.1:{args.port}"
+        print(  # noqa: T201
+            f"chronotrace: recording live -> {out} (session {out.stem!r}); watch at {base}/docs"
+        )
+        webbrowser.open(f"{base}/docs")  # the API explorer until the scrubber UI lands (day 35)
+        recorder = record_script(args.script, args.script_args, config, sink)
+        sink.finalize(recorder.values, intern_tables(recorder))
+        print(  # noqa: T201
+            f"chronotrace: recording complete -> {out}. Scrub it at {base}; Ctrl-C to stop serving."
+        )
+        server.wait()
+    except KeyboardInterrupt:
+        print("\nchronotrace: stopping.")  # noqa: T201
+    finally:
+        server.terminate()
+        try:
+            server.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            server.kill()
+    return 0
+
+
+def _wait_for_port(port: int, *, timeout: float = 10.0) -> bool:
+    """Poll `127.0.0.1:port` until the live server is accepting connections, or time out."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        with socket.socket() as probe:
+            probe.settimeout(0.25)
+            try:
+                probe.connect(("127.0.0.1", port))
+                return True
+            except OSError:
+                time.sleep(0.1)
+    return False
 
 
 def serve_command(args: argparse.Namespace) -> int:

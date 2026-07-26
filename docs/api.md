@@ -46,7 +46,43 @@ type is reachable.
 | `GET` | `/api/sessions/{id}/calltree?seq=` | `CallTree` — the frames live at an instant |
 | `POST` | `/api/sessions/{id}/query` | `QueryResult` — a typed query by name + args |
 | `GET` | `/api/sessions/{id}/step?seq=&dir=&mode=` | `StepResult` — the destination instant, or an edge |
-| `WS` | `/api/sessions/{id}/stream` | live events while recording (day 34) |
+| `WS` | `/api/sessions/{id}/stream` | live timeline while recording (day 34) |
+
+## The live stream (`WS /api/sessions/{id}/stream`)
+
+Watch a recording's timeline fill as the program runs, then scrub it the moment it ends. The
+server tails the `.chrono` while it is still being written (`store.tailer`, which reuses the
+crash-recovery classifier -- a torn tail is "not finished yet" in a live file, "corrupt" in a
+finished one, and only whether the writer is alive tells them apart) and pushes one aggregated
+`StreamFrame` per ~100 ms tick:
+
+```jsonc
+{ "total_events": 41000, "state": "running",
+  "density":  [ { "first_seq": 40960, "event_count": 512 } ],  // new events per bucket
+  "notable":  [ { "seq": 40987, "kind": "raise", "lineno": 42 } ],  // exceptions, live
+  "dropped":  0 }                                              // backpressure summary
+```
+
+- **It streams shape, not events.** Density buckets plus notable events (exceptions), never the
+  raw stream -- the per-instant detail is a `/state` call away once the playhead parks, exactly
+  as the day-27 density index trades the event stream for a per-bucket count.
+- **Batched by time.** One frame per tick, so a 100k-event/sec burst is one bounded frame, not
+  100k messages that would drown the browser; a slow program still updates within a tick because
+  the writer flushes partial blocks on an interval.
+- **Drop-and-summarise backpressure.** A frame's size is bounded by policy (`density` is compact,
+  `notable` is capped); anything beyond becomes a `dropped` count, so server memory stays flat
+  under a slow client. This drops *frames from a live preview*, never *data from the recording* --
+  the file stays complete on disk, and the distinction is the whole design.
+- **`state` ends the stream.** `complete` (the footer arrived -- now fully scrubbable) or
+  `truncated` (events dropped, or the writer died before a footer). Then the socket closes.
+- **`Origin` is validated by hand.** Browsers do not apply CORS to WebSocket handshakes, so this
+  endpoint checks `Origin` against the UI allowlist explicitly -- the hole most local dev tools
+  leave open. A page on any other origin is refused before the handshake completes.
+
+`chronotrace record --ui script.py` records live: it serves the recording as it streams (a
+separate process, isolated from the monitored one) and opens a browser. (The flags precede the
+script — `argparse.REMAINDER` passes everything after it to the target as its own `argv`.) The visual scrubber
+lands with the day-35 UI; until then `--ui` opens the API explorer at `/docs`.
 
 ## Caching model
 

@@ -196,7 +196,14 @@ extra, so recording stays dependency-light — install it only if you want to se
 ```bash
 pip install -e ".[ui]"
 chronotrace serve --dir .          # serves every .chrono in the directory
+chronotrace record --ui app.py     # record live: watch the timeline fill, then scrub it
 ```
+
+`--ui` streams the recording to disk as the program runs and serves it live over a WebSocket,
+so the timeline fills in real time and becomes fully scrubbable the instant the program ends.
+It is a live *view*, not a live debugger — no pausing the target, no interactive breakpoints
+(those are post-1.0). The visual scrubber UI lands in Phase 5; until then `--ui` opens the API
+explorer.
 
 Then time-travel with `curl` (interactive docs at `http://localhost:8000/docs`):
 
