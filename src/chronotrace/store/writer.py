@@ -55,7 +55,9 @@ spec-permitted empty map, and the reservation stays deliberate.
 from __future__ import annotations
 
 import os
+import time
 import zlib
+from collections.abc import Iterable
 from typing import BinaryIO
 
 from chronotrace.recorder.capture import CapturedValue
@@ -180,6 +182,16 @@ class ChronoWriter:
         """
         self._strings = strings
 
+    def flush(self) -> None:
+        """Write any buffered events (and their deltas) as a block now, without closing.
+
+        The streaming path (day 34) calls this on a time interval so a *slow* program's events
+        reach disk -- and a live tailer -- promptly, rather than waiting for a full block. A
+        no-op when nothing is buffered; a partial flush is just a smaller block, which the
+        reader and tailer handle by its stored event count like any other.
+        """
+        self._flush()
+
     def close(self, *, truncated: bool = False) -> None:
         """Flush events, write the value pool, then the index and EOCD. Idempotent.
 
@@ -303,6 +315,85 @@ class FileSink:
             os.fsync(self._file.fileno())
         except OSError:
             pass  # a failed footer/fsync leaves a footerless file, recovered by scan
+        finally:
+            self._file.close()
+
+    @property
+    def truncated(self) -> bool:
+        """True if events were dropped -- the recording is a prefix, not the whole."""
+        return self._dropping
+
+
+class StreamingFileSink:
+    """A `Sink` that streams events to a `.chrono` as they arrive; the footer waits for `finalize`.
+
+    The reason to differ from `FileSink`: a *complete* recording also needs the value pool and
+    the name/strings tables, and those cross a layer boundary the store must not (the CLI, which
+    spans both layers, supplies them -- `store` never builds `Strings` from a recorder). So the
+    recorder's `close()` here just flushes the last events to disk, where a live tailer sees
+    them at once, and the caller calls `finalize(values, strings)` once recording has stopped to
+    write VALUES/STRINGS and the footer. The value pool is written *after* the events but its
+    content-addressed refs still match, because both derive from the recorder's value order --
+    the reader finds it via the footer index, not by position.
+
+    A `finalize` that never runs (the caller crashed) leaves a footerless file, which the reader
+    recovers as a truncated prefix: the same crash-recovery path, no data invented.
+
+    A slow program still streams: `emit` flushes a partial block if `flush_interval` has passed,
+    so a program emitting one event a minute reaches a live tailer within that interval instead
+    of waiting for a full 4096-event block.
+    """
+
+    __slots__ = ("_dropping", "_file", "_finalized", "_flush_interval", "_last_flush", "_writer")
+
+    def __init__(
+        self,
+        path: str | os.PathLike[str],
+        *,
+        block_events: int = DEFAULT_BLOCK_EVENTS,
+        flush_interval: float = 0.1,
+    ) -> None:
+        self._file = open(path, "wb")  # noqa: SIM115, PTH123 -- lifetime spans emit()/finalize()
+        self._writer = ChronoWriter(self._file, block_events=block_events)
+        self._flush_interval = flush_interval
+        self._last_flush = time.monotonic()
+        self._dropping = False
+        self._finalized = False
+
+    def emit(self, event: Event) -> None:
+        """Stream one event; flush a partial block on the time interval. Never raises."""
+        if self._dropping:
+            return
+        try:
+            self._writer.add(event)
+            now = time.monotonic()
+            if now - self._last_flush >= self._flush_interval:
+                self._writer.flush()
+                self._last_flush = now
+        except OSError:
+            self._dropping = True  # disk failed: keep the writer for finalize, drop events
+
+    def close(self) -> None:
+        """Recorder stop: flush the buffered tail to disk. The footer is `finalize`'s job."""
+        try:
+            self._writer.flush()
+        except OSError:
+            self._dropping = True
+
+    def finalize(self, values: Iterable[CapturedValue], strings: Strings) -> None:
+        """Write the value pool, the intern tables, and the footer. Idempotent; never raises."""
+        if self._finalized:
+            return
+        self._finalized = True
+        try:
+            for captured in values:
+                self._writer.add_value(captured)
+            self._writer.add_strings(strings)
+            self._writer.close(truncated=self._dropping)
+            self._file.flush()
+            os.fsync(self._file.fileno())
+        except OSError:
+            pass  # a failed footer leaves a footerless file, recovered by scan
         finally:
             self._file.close()
 

@@ -41,7 +41,7 @@ from chronotrace.store.keyframe import FrameSnapshot, Keyframe
 from chronotrace.store.reader import ChronoReader
 from chronotrace.store.recovery import repair
 from chronotrace.store.strings import CodeInfo, Strings
-from chronotrace.store.writer import ChronoWriter, FileSink
+from chronotrace.store.writer import ChronoWriter, FileSink, StreamingFileSink
 
 __all__ = [
     "ChronoError",
@@ -53,6 +53,7 @@ __all__ = [
     "FileSink",
     "FrameSnapshot",
     "Keyframe",
+    "StreamingFileSink",
     "Strings",
     "TruncatedRecording",
     "UnsupportedVersion",

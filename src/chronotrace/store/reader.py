@@ -61,7 +61,12 @@ from typing import BinaryIO
 
 from chronotrace.recorder.capture import CapturedValue
 from chronotrace.recorder.events import Event
-from chronotrace.store.columnar import COUNT_SIZE, MAX_EVENTS_PER_BLOCK, decode_events, peek_count
+from chronotrace.store.columnar import (
+    COUNT_SIZE,
+    MAX_EVENTS_PER_BLOCK,
+    events_from_block,
+    peek_count,
+)
 from chronotrace.store.compression import decompress
 from chronotrace.store.constants import (
     BLOCK_HEADER_SIZE,
@@ -359,28 +364,15 @@ class ChronoReader:
             return cached
         try:
             _bt, flags, payload, _next = decode_block(self._buf, offset)  # CRC-checked
-            events = decode_events(  # bounded (columnar.py); minor drives the column count
-                self._events_payload(flags, payload), self._minor
-            )
+            # bounded (columnar.py); minor drives the column count. Shared with the live
+            # tailer (day 34) so both decode an EVENTS block identically.
+            events = events_from_block(flags, payload, self._minor)
         except (BlockError, ValueError, struct.error) as exc:
             raise CorruptRecording(f"block at offset {offset}: {exc}") from exc
         self._cache[offset] = events
         if len(self._cache) > self._cache_blocks:
             self._cache.popitem(last=False)
         return events
-
-    def _events_payload(self, flags: int, payload: bytes) -> bytes:
-        """A columnar EVENTS payload, decompressing the columns behind the raw count.
-
-        The u32 count is stored uncompressed (so `peek_count` can index by seq without
-        decompressing); only the columns after it are the compression frame. VALUES has
-        no such prefix, so it decompresses whole. `decompress` is bounded, so a bomb or
-        corrupt frame raises a `ValueError` subclass the callers turn into
-        `CorruptRecording`.
-        """
-        if flags & BlockFlag.COMPRESSED_ZSTD:
-            return payload[:COUNT_SIZE] + decompress(payload[COUNT_SIZE:])
-        return payload
 
     # -- values -------------------------------------------------------------
 

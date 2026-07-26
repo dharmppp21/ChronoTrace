@@ -41,6 +41,8 @@ from itertools import accumulate
 
 from chronotrace.recorder.events import Event, EventKind
 from chronotrace.recorder.values import ValueRef
+from chronotrace.store.compression import decompress
+from chronotrace.store.constants import BlockFlag
 
 # Field order is the on-disk column order and must match the spec. `None` -> -1.
 # APPEND-ONLY: a new column goes at the end, never in the middle, so an older reader
@@ -242,6 +244,19 @@ def peek_count(buf: object, payload_offset: int) -> int:
             frame size). The caller must have checked it is in bounds.
     """
     return int(_COUNT.unpack_from(buf, payload_offset)[0])  # type: ignore[arg-type]
+
+
+def events_from_block(flags: int, payload: bytes, minor: int) -> list[Event]:
+    """Decode one EVENTS block's payload to events, decompressing the columns if flagged.
+
+    The u32 event count stays uncompressed at the payload front so `peek_count` can index by
+    seq without decompressing; only the columns after it are the zstd frame. The random-access
+    reader and the live tailer (day 34) share this one path, so the two can never disagree on
+    what an EVENTS block decodes to -- the reason it lives here rather than in each caller.
+    """
+    if flags & BlockFlag.COMPRESSED_ZSTD:
+        payload = payload[:COUNT_SIZE] + decompress(payload[COUNT_SIZE:])
+    return decode_events(payload, minor)
 
 
 def decode_events(payload: bytes, minor: int) -> list[Event]:

@@ -104,16 +104,16 @@ def test_truncated_flag_is_read_from_the_footer() -> None:
 
 def test_blocks_are_decoded_lazily_and_cached(monkeypatch: Any) -> None:
     """Open decodes nothing; each new block decodes once; a re-read is an LRU hit."""
-    from chronotrace.store.columnar import decode_events as real
+    from chronotrace.store.columnar import events_from_block as real
 
     calls = 0
 
-    def counting(payload: bytes, minor: int) -> list[Event]:
+    def counting(flags: int, payload: bytes, minor: int) -> list[Event]:
         nonlocal calls
         calls += 1
-        return real(payload, minor)
+        return real(flags, payload, minor)
 
-    monkeypatch.setattr("chronotrace.store.reader.decode_events", counting)
+    monkeypatch.setattr("chronotrace.store.reader.events_from_block", counting)
 
     reader = ChronoReader.from_bytes(_bytes_of([_ev(s) for s in range(6)], block_events=2))
     assert calls == 0, "open() must not decode any block"
