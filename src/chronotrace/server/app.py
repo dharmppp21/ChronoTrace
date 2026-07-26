@@ -78,6 +78,9 @@ def create_app(config: ServerConfig) -> FastAPI:
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         store = SessionStore(config.recordings_dir)
         app.state.store = store
+        # The WebSocket stream validates Origin by hand (CORS does not cover WS), so it needs
+        # the allowlist on app.state -- middleware config is not readable from a handler.
+        app.state.allowed_origins = config.allowed_origins
         try:
             yield
         finally:

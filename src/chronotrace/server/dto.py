@@ -280,6 +280,61 @@ class StepResult:
     edge: StepEdge | None
 
 
+# -- live stream (day 34) ---------------------------------------------------------------
+
+
+class StreamState(enum.Enum):
+    """Where a live recording is, on the wire -- the resolved form of `store.TailState`.
+
+    A wire enum of its own rather than the storage one, for the same reason every DTO is not
+    its storage type: `server` must be free to serve a state the store does not name, and the
+    store free to gain a state the wire does not yet expose.
+    """
+
+    RUNNING = "running"
+    COMPLETE = "complete"  # the footer arrived: the recording is now fully scrubbable
+    TRUNCATED = "truncated"  # dropped events, or the writer died before a footer
+
+
+@dataclass(frozen=True, slots=True)
+class DensityDelta:
+    """New events in one timeline bucket since the last frame -- the scrubber fills from these.
+
+    Density, not events: a live view needs the *shape* of activity (where it is dense), not
+    every event. The detail is a `/state` call away once the user parks the playhead, exactly
+    as the day-27 density index trades the whole event stream for a per-bucket count.
+    """
+
+    first_seq: int
+    event_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class NotableEvent:
+    """A notable instant worth a marker as it happens -- an exception being born, live."""
+
+    seq: int
+    kind: str
+    lineno: int
+
+
+@dataclass(frozen=True, slots=True)
+class StreamFrame:
+    """One WebSocket message: the aggregate of a batch of events, never the raw events.
+
+    Aggregated on purpose. At 100k events/sec, one message per event drowns the browser; one
+    message per poll carrying a bounded density delta plus a capped list of notable events does
+    not, and it is why server memory stays flat under a slow client -- the file is the source of
+    truth, so anything that does not fit in a frame is summarised (`dropped`), never queued.
+    """
+
+    total_events: int
+    state: StreamState
+    density: tuple[DensityDelta, ...]
+    notable: tuple[NotableEvent, ...]
+    dropped: int
+
+
 # -- errors (RFC 7807-ish) --------------------------------------------------------------
 
 
