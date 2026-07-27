@@ -364,7 +364,15 @@ def _statement(draw: st.DrawFn, env: Env, depth: int) -> tuple[list[Stmt], Env]:
     if depth > 0:
         options.extend([_conditional(env, depth), _loop(env, depth), _try_block(env, depth)])
         options.extend([_function(env, depth), _class_def(env), _recursion(env)])
-        options.append(_shadow_global(env))
+        if GLOBAL_NAME not in env.enclosing:
+            # Only shadow the global where it is not *already* nonlocal-able from an outer
+            # function. Binding `G` locally in such a scope makes `G` a compile-time local of
+            # it, which retroactively captures any nested `nonlocal G` to this scope's binding
+            # -- and that binding may execute after the closure runs, an UnboundLocalError the
+            # grammar never meant to generate. With this guard `G` is bound at exactly one
+            # function level, always before a nested closure that reads it. The edge case
+            # (a local shadowing the global) is still generated at that outer level.
+            options.append(_shadow_global(env))
         if env.enclosing:
             # Weighted up by repetition, which is how `one_of` expresses a bias. Closures
             # writing to an enclosing scope need a function nested inside a function that
