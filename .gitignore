@@ -37,3 +37,9 @@ Thumbs.db
 
 # Spike harness output (regenerate with: python spikes/bench_overhead.py)
 spikes/results*.json
+
+# Frontend (Phase 5). node_modules is never committed; the built UI is a generated
+# artifact bundled into the wheel at release, not source (see pyproject `artifacts`).
+# `dist/` above already covers frontend/dist.
+node_modules/
+src/chronotrace/_ui/

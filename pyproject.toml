@@ -100,6 +100,13 @@ path = "src/chronotrace/_version.py"
 # tests/, spikes/ or benchmarks/ in the wheel.
 [tool.hatch.build.targets.wheel]
 packages = ["src/chronotrace"]
+# The built frontend (day 35) lands in src/chronotrace/_ui/ and is gitignored -- a build
+# artifact, not source. `artifacts` overrides the VCS-ignore so the wheel bundles it when it
+# exists, and matches nothing (no error) when it does not: a source install with no frontend
+# build is an API-only server, and a release wheel carries the whole UI. CI runs `npm run build`
+# and copies the output into place before `hatch build`; see .github/workflows/ci.yml. Day 44
+# (packaging) depends on this being here.
+artifacts = ["src/chronotrace/_ui/**"]
 
 [tool.hatch.build.targets.sdist]
 include = ["src/chronotrace", "tests", "docs", "README.md", "LICENSE"]

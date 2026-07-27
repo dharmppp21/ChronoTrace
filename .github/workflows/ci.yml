@@ -70,3 +70,38 @@ jobs:
 
       - name: Tests
         run: pytest
+
+  # The frontend (Phase 5, day 35) is built in Antigravity and lands in `frontend/`. These
+  # steps are guarded on that directory existing, so this job is green today (they skip) and
+  # enforces build + types + tests the moment the UI is committed -- a DTO change that breaks
+  # the generated client then fails the build here, not in a demo. A single Linux runner: the
+  # frontend is platform-independent, unlike the .chrono format the matrix above guards.
+  frontend:
+    name: frontend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install
+        if: hashFiles('frontend/package-lock.json') != ''
+        run: npm ci
+        working-directory: frontend
+
+      - name: Typecheck
+        if: hashFiles('frontend/package.json') != ''
+        run: npm run typecheck
+        working-directory: frontend
+
+      - name: Test
+        if: hashFiles('frontend/package.json') != ''
+        run: npm test
+        working-directory: frontend
+
+      - name: Build
+        if: hashFiles('frontend/package.json') != ''
+        run: npm run build
+        working-directory: frontend

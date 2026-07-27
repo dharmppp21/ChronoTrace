@@ -45,6 +45,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 from starlette.middleware.cors import CORSMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
@@ -55,6 +56,11 @@ from chronotrace.server.routes import router
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
+
+_UI_DIR = Path(__file__).resolve().parent.parent / "_ui"
+"""Where the built frontend lives inside the installed package. A build artifact (gitignored),
+present only in a release wheel or after a local `npm run build` copies it here -- so a plain
+source checkout serves the API alone, no UI, no error."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,4 +110,22 @@ def create_app(config: ServerConfig) -> FastAPI:
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=list(config.allowed_hosts))
     install_error_handlers(app)
     app.include_router(router)
+    _mount_ui(app)
     return app
+
+
+def _mount_ui(app: FastAPI) -> None:
+    """Serve the built frontend at `/`, if it was bundled into the package.
+
+    Two modes. In **development** the UI runs on Vite's own server, which proxies `/api` and
+    the WebSocket back here, so Python serves no assets and the frontend gets HMR. In
+    **production** one Python process serves the pre-built SPA from `chronotrace/_ui/` -- a
+    debugger you can open without a Node runtime, which a debugger that needed Node just to view
+    a recording would not be.
+
+    Mounted last, so the API routes and the WebSocket (registered above) take precedence over
+    this catch-all; and skipped when the UI was never built, leaving an API-only server rather
+    than a crash. The build lands the assets here (`.github/workflows/ci.yml`, wheel `artifacts`).
+    """
+    if (_UI_DIR / "index.html").is_file():
+        app.mount("/", StaticFiles(directory=_UI_DIR, html=True), name="ui")
