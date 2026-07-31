@@ -80,6 +80,40 @@ the current frame drive which file to fetch and which line to highlight.
 returns a `QueryResult` whose `hits[].seq` are the jump-to instants. This is the panel's hero
 interaction — a breakpoint set on a program that already finished.
 
+## Variables panel (day 37) — the backend contract
+
+**Current locals** come from `/state?seq=`: `frames[].variables[]` = `{ name, preview, ref,
+has_children, truncated, obj_id }`. `ref` + `has_children` drive lazy expansion via `/value?ref=`
+(one level at a time — do not fetch a 10k-element list to show one row).
+
+**The diff — the hero.** `GET /api/sessions/{id}/diff?seq=` → `{ seq, changes:[{ frame_id, name,
+kind, old, new }] }`, `kind ∈ {added, removed, modified}`. Paint added=green, removed=red,
+modified=amber (`old → new`). It is a **server-side lookup from the day-16 invertible deltas**,
+not a comparison of two reconstructed states — the deltas already carry each binding's old and
+new ref, so it is O(changes), exact, and cheap. What it can and cannot show:
+- **Content** changes (an object mutated, or rebound to different content) → MODIFIED, `old != new`.
+- An **identity-only** change (rebound to a *different* object of equal content) is coalesced by
+  day-8 content-addressed dedup — the refs are equal, no delta exists, **not shown**.
+- **REMOVED** (`del x`) is rare: the recorder does not observe a name leaving `f_locals`.
+
+**Honest markers (never silently empty).** The `preview` string already carries the lossy-capture
+states rendered distinctly: `<redacted>`, `<budget>` (node budget hit), `<depth>` (depth limit),
+`<cycle>` (a back-reference), a trailing `...` (a truncated container/string), `Type(...)` (an
+opaque object). Match that fixed set and make each a hoverable, explained badge — never a blank
+or `null`. The `truncated` flag is the structured signal that a container/string was cut short.
+*(The exact "showing 100 of 1,000,000" count is not exposed yet — the preview shows `...` and
+`truncated: true`; ask for a `length` field if you want the precise number, it is additive.)*
+
+**Identity badges — a real limitation.** `obj_id` is the day-7 stable object id: two variables
+sharing an `obj_id` are the same object, so badge the aliasing. **But `obj_id` is `null` for
+`dict`/`list`** (they are not weakref-able, so no reuse-safe id can be assigned — issue #9), so
+the badge covers **custom-object aliasing only**. The demo bug's shared *list* is not badge-able
+until #9 is solved (which is hard: a stable id for a dict/list without retaining the object).
+
+**Right-click → the query engine** (existing `POST /query`, no new backend): `{name:"var-writes",
+args:{name}}` = every write to it; `{name:"provenance", args:{name, seq}}` = where its value came
+from; `{name:"watch", args:{name}}` = every instant it changed. Each returns `hits[].seq` jumps.
+
 ## Production build
 
 ```bash
