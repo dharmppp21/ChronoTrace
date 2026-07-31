@@ -12,10 +12,12 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, cast
 
-from fastapi import Request
+import pytest
+from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
 from chronotrace.query import QueryContext
@@ -23,6 +25,8 @@ from chronotrace.server import present
 from chronotrace.server.deps import Metrics
 from chronotrace.server.routes.sessions import _read_source
 from chronotrace.server.routes.state import _reconstruct
+
+from .conftest import record_into
 
 
 def _meta(client: TestClient, sid: str) -> dict[str, Any]:
@@ -51,9 +55,11 @@ def test_openapi_generates_and_is_valid(client: TestClient) -> None:
         "/api/sessions/{session_id}/state",
         "/api/sessions/{session_id}/source",
         "/api/sessions/{session_id}/calltree",
+        "/api/sessions/{session_id}/calltree/children",
         "/api/sessions/{session_id}/value",
         "/api/sessions/{session_id}/step",
         "/api/sessions/{session_id}/query",
+        "/api/queries",
     ):
         assert path in paths, path
 
@@ -174,6 +180,88 @@ def test_calltree(client: TestClient, session_id: str) -> None:
         f"/api/sessions/{session_id}/calltree", params={"seq": _mid_seq(client, session_id)}
     ).json()
     assert isinstance(tree["frames"], list)
+    for frame in tree["frames"]:
+        assert frame["exit_kind"] in {"returned", "raised", "open"}  # every node carries its fate
+
+
+def _root_frame(client: TestClient, sid: str) -> int:
+    """A frame with no parent, live at mid-recording -- the root of the call tree to walk from."""
+    tree = client.get(f"/api/sessions/{sid}/calltree", params={"seq": _mid_seq(client, sid)}).json()
+    roots = [f for f in tree["frames"] if f["parent_frame_id"] is None]
+    assert roots, "some live frame must be a root"
+    return int(roots[0]["frame_id"])
+
+
+def _all_descendants(client: TestClient, sid: str, root: int) -> list[dict[str, Any]]:
+    """Every node under `root`, gathered by expanding children one frame at a time (as the UI)."""
+    out: list[dict[str, Any]] = []
+    stack = [root]
+    while stack:
+        parent = stack.pop()
+        kids = client.get(
+            f"/api/sessions/{sid}/calltree/children", params={"parent": parent, "limit": 1000}
+        ).json()["frames"]
+        out += kids
+        stack += [int(k["frame_id"]) for k in kids]
+    return out
+
+
+def test_calltree_children_are_lazily_expandable_and_carry_jump_targets(
+    client: TestClient, session_id: str
+) -> None:
+    """Tree mode: a child node carries frame_id (recurse), entry_seq (jump), exit_seq (return)."""
+    nodes = _all_descendants(client, session_id, _root_frame(client, session_id))
+    assert nodes, "simple.py::main calls quadruple/double -- the tree is not flat"
+    for node in nodes:
+        assert {"frame_id", "entry_seq", "exit_seq", "exit_kind"} <= node.keys()
+        if node["exit_kind"] != "open":  # a returned/unwound frame's return is after its entry
+            assert node["exit_seq"] > node["entry_seq"]
+
+
+def test_calltree_children_without_a_parent_returns_the_forest_roots(
+    client: TestClient, session_id: str
+) -> None:
+    """No `parent` -> the forest roots (frames with no parent), where tree mode bootstraps."""
+    roots = client.get(f"/api/sessions/{session_id}/calltree/children").json()["frames"]
+    assert roots, "the recording has at least one top-level call"
+    assert all(node["parent_frame_id"] is None for node in roots)
+
+
+def test_calltree_children_paginate_with_a_stable_cursor(
+    client: TestClient, session_id: str
+) -> None:
+    """Paging a frame's children one at a time yields the same nodes, in order, as one full page."""
+    parent = _root_frame(client, session_id)
+    full = client.get(
+        f"/api/sessions/{session_id}/calltree/children", params={"parent": parent, "limit": 1000}
+    ).json()
+    assert full["next_cursor"] is None  # main's handful of children fit one page
+
+    paged: list[int] = []
+    cursor = -1
+    while True:
+        page = client.get(
+            f"/api/sessions/{session_id}/calltree/children",
+            params={"parent": parent, "after": cursor, "limit": 1},
+        ).json()
+        paged += [int(n["frame_id"]) for n in page["frames"]]
+        if page["next_cursor"] is None:
+            break
+        cursor = page["next_cursor"]
+    assert paged == [int(n["frame_id"]) for n in full["frames"]]
+
+
+def test_calltree_colours_exception_unwound_exits(
+    recordings: Path, app_factory: Callable[..., FastAPI]
+) -> None:
+    """The one-glance answer to "where did it blow up?": an unwound frame is `raised`, a caught
+    one `returned`. `exceptions.py::main` raises deep in `_innermost`, catches in `deep_raise`.
+    """
+    sid = record_into(recordings, module="exceptions", func="main")
+    with TestClient(app_factory()) as client:
+        kinds = {n["exit_kind"] for n in _all_descendants(client, sid, _root_frame(client, sid))}
+    assert "raised" in kinds  # _innermost and _middle were unwound by the ValueError
+    assert "returned" in kinds  # deep_raise caught it and returned normally
 
 
 def test_step_forward_lands_on_an_instant_or_edge(client: TestClient, session_id: str) -> None:
@@ -196,6 +284,80 @@ def test_query_line_hits(client: TestClient, session_id: str) -> None:
     assert body["hits"], "line 18 (result = n * 2) runs every time double() is called"
     assert all("seq" in hit for hit in body["hits"])
     assert result.headers["cache-control"] == "no-store"
+
+
+def test_query_catalog_lists_every_query_with_its_arg_schema(client: TestClient) -> None:
+    """The API describes its own queries: name, summary, and each argument's type and required."""
+    from chronotrace.query import registry
+
+    catalog = client.get("/api/queries").json()
+    assert {q["name"] for q in catalog} == set(registry.names())
+    brk = next(q for q in catalog if q["name"] == "break")
+    args = {a["name"]: a for a in brk["args"]}
+    assert args["file"] == {"name": "file", "type": "string", "required": True}
+    assert args["lineno"] == {"name": "lineno", "type": "integer", "required": True}
+    assert args["condition"]["type"] == "string"  # `str | None` -> string
+    assert args["condition"]["required"] is False  # the optional --if condition
+
+
+def test_a_new_registered_query_appears_in_the_catalog(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The decoupling that is the point: register a query on the backend and its form appears in
+    the API with zero frontend change -- proven by adding a fake query and finding it, formed."""
+    from dataclasses import dataclass
+
+    from chronotrace.query import registry
+
+    @dataclass(frozen=True, slots=True)
+    class _FakeQuery:
+        needle: str
+        limit: int = 10
+
+    original_load = registry.load
+    monkeypatch.setitem(registry._QUERIES, "fake", registry._Entry("_:_", "a fake query"))
+    monkeypatch.setattr(
+        registry, "load", lambda name: _FakeQuery if name == "fake" else original_load(name)
+    )
+
+    fake = next(q for q in client.get("/api/queries").json() if q["name"] == "fake")
+    assert fake["summary"] == "a fake query"
+    args = {a["name"]: a for a in fake["args"]}
+    assert args["needle"] == {"name": "needle", "type": "string", "required": True}
+    assert args["limit"] == {"name": "limit", "type": "integer", "required": False}
+
+
+def test_a_malformed_condition_is_a_teaching_bad_request(
+    client: TestClient, session_id: str
+) -> None:
+    """A syntax error in a condition is bad *input* (400) with the parser's positioned message --
+    not a misleading 404 that says the thing you asked about does not exist."""
+    response = client.post(
+        f"/api/sessions/{session_id}/query",
+        json={"name": "break", "args": {"file": "simple.py", "lineno": 18, "condition": "i >"}},
+    )
+    assert response.status_code == 400
+    body = response.json()
+    assert body["code"] == "bad_request"
+    assert "column" in body["detail"].lower()  # a caret position for the offending character
+
+
+def test_a_call_in_a_condition_is_refused_with_the_rule(
+    client: TestClient, session_id: str
+) -> None:
+    """A condition using a call is refused *with why* -- the day-30 security rule delivered as the
+    error itself, documentation exactly when it is needed."""
+    response = client.post(
+        f"/api/sessions/{session_id}/query",
+        json={
+            "name": "break",
+            "args": {"file": "simple.py", "lineno": 18, "condition": "len(i) > 0"},
+        },
+    )
+    assert response.status_code == 400
+    body = response.json()
+    assert body["code"] == "bad_request"
+    assert "call" in body["detail"].lower()  # explains that calls are not allowed
 
 
 # -- the container-expansion path, without depending on an example's locals --------------
