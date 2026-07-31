@@ -113,6 +113,24 @@ def _value(ctx: QueryContext, ref: int) -> dto.Value:
     return present.value(captured)
 
 
+@router.get("/api/sessions/{session_id}/diff", response_model=dto.Diff)
+def get_diff(
+    session_id: str,
+    seq: int,
+    request: Request,
+    ctx: QueryContext = Depends(get_context),
+    store: SessionStore = Depends(get_store),
+) -> Response:
+    """What changed from `seq-1` to `seq` -- the variable diff, read from the day-16 deltas.
+
+    Immutable per `seq` (a finished recording's transition never changes), so it caches like
+    `/state`: a repeat drag over the same instant is a 304.
+    """
+    validate_seq(ctx.reader, seq)
+    etag = f'"{store.fingerprint(session_id)}-diff-{seq}"'
+    return cached(request, etag, lambda: present.diff(ctx, seq))
+
+
 @router.get("/api/sessions/{session_id}/step", response_model=dto.StepResult)
 def get_step(
     session_id: str,

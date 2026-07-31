@@ -95,6 +95,11 @@ class Variable:
     `ref` is the value's handle: a big list ships its preview and `has_children=True`, and the
     client fetches its rows from `GET /value?ref=` only when the user expands it. That reuses
     day-20 lazy resolution -- the server resolves one ref, not a frame's whole object graph.
+
+    `obj_id` is the value's stable object identity (day-7), so two variables holding the same
+    object share an id and the UI can badge the aliasing. It is None for atoms, and -- a known
+    limitation (issue #9) -- for `dict`/`list`, which are not weakref-able and so cannot carry a
+    reuse-safe id; only a custom object's aliasing is currently badge-able.
     """
 
     name: str
@@ -102,6 +107,7 @@ class Variable:
     ref: int | None
     has_children: bool
     truncated: bool
+    obj_id: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,6 +146,48 @@ class State:
     frames: tuple[Frame, ...]
     truncated: bool
     exception: ExceptionInfo | None = None
+
+
+# -- variable diff (day 37) -------------------------------------------------------------
+
+
+class ChangeKind(enum.Enum):
+    """How a binding changed between two instants -- the three colours a diff panel paints."""
+
+    ADDED = "added"  # the name did not exist at seq-1 (a creation)
+    REMOVED = "removed"  # the name is gone at seq (a `del`)
+    MODIFIED = "modified"  # the name's value changed, old -> new
+
+
+@dataclass(frozen=True, slots=True)
+class VarChange:
+    """One binding that changed at an instant -- a preview pair, the diff panel's row."""
+
+    frame_id: int
+    name: str
+    kind: ChangeKind
+    old: str | None = None  # the previous value's preview (REMOVED / MODIFIED)
+    new: str | None = None  # the new value's preview (ADDED / MODIFIED)
+
+
+@dataclass(frozen=True, slots=True)
+class Diff:
+    """`GET /api/sessions/{id}/diff?seq=` -- exactly what changed from `seq-1` to `seq`.
+
+    A *lookup*, not a comparison of two reconstructed states: the day-16 invertible deltas
+    already carry each binding's old and new ref, so the diff is the BIND deltas at `seq` with
+    both refs resolved to previews. Storing the old ref 21 days ago is why this is O(changes),
+    not O(locals) over two full states -- the whole point of paying those bytes.
+
+    What it shows, and what it cannot: a *content* change (the same object mutated, or rebound
+    to different content) is MODIFIED with `old != new`. An *identity-only* change (rebound to a
+    different object of equal content) is coalesced by day-8 content-addressed dedup -- the two
+    refs are equal, so no delta exists and it is not shown. And REMOVED (`del x`) is rare,
+    because the recorder does not observe a name leaving `f_locals` (a tracked limitation).
+    """
+
+    seq: int
+    changes: tuple[VarChange, ...]
 
 
 # -- lazy value expansion ---------------------------------------------------------------

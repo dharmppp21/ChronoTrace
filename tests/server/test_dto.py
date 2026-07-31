@@ -109,6 +109,7 @@ def test_state_serialises_to_a_locked_shape() -> None:
                         "ref": 7,
                         "has_children": False,
                         "truncated": False,
+                        "obj_id": None,
                     }
                 ],
             }

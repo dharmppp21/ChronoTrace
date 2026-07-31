@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING, Any
 from chronotrace.query._resolve import MAX_PREVIEW_CHARS, render_captured
 from chronotrace.reconstruct import Edge
 from chronotrace.server import dto
+from chronotrace.store.delta import NO_REF, DeltaKind
 
 if TYPE_CHECKING:
     from chronotrace.query import Hit, QueryContext
@@ -38,6 +39,7 @@ if TYPE_CHECKING:
     from chronotrace.reconstruct import ExceptionState, FrameState, ProgramState
     from chronotrace.reconstruct import StepResult as EngineStep
     from chronotrace.store import ChronoReader, Strings
+    from chronotrace.store.delta import Delta
 
 _SEQ_TAGS = frozenset({"list", "tuple", "set", "frozenset"})
 _CONTAINER_TAGS = _SEQ_TAGS | {"dict"}
@@ -154,14 +156,70 @@ def _variable(ctx: QueryContext, name: str, value_ref: int) -> dto.Variable:
         )
     preview, _kind, has_children, truncated = _inspect(captured)
     return dto.Variable(
-        name=name, preview=preview, ref=value_ref, has_children=has_children, truncated=truncated
+        name=name,
+        preview=preview,
+        ref=value_ref,
+        has_children=has_children,
+        truncated=truncated,
+        obj_id=_obj_id(captured),
     )
+
+
+def _obj_id(captured: Any) -> int | None:
+    """The captured object's stable identity id (day-7), for the aliasing badge, or None.
+
+    Present only for weakref-able objects (custom classes); a `dict`/`list` carries no id
+    (issue #9) and an atom is not an object -- so the badge covers custom-object aliasing only.
+    """
+    return captured.get("id") if _tagged(captured) else None
 
 
 def _exception(strings: Strings, exc: ExceptionState) -> dto.ExceptionInfo:
     return dto.ExceptionInfo(
         exc_type=_exc_type(strings, exc.exc_type_id), raised_at_seq=exc.raised_at_seq
     )
+
+
+# -- variable diff (day 37) -------------------------------------------------------------
+
+
+def diff(ctx: QueryContext, seq: int) -> dto.Diff:
+    """The BIND deltas at `seq` as a variable diff -- each old/new ref resolved to a preview."""
+    strings = ctx.reader.strings()
+    changes = tuple(
+        _change(ctx, strings, d)
+        for d in ctx.reader.deltas_between(seq, seq)
+        if d.kind == DeltaKind.BIND
+    )
+    return dto.Diff(seq=seq, changes=changes)
+
+
+def _change(ctx: QueryContext, strings: Strings, d: Delta) -> dto.VarChange:
+    added, removed = d.old_ref == NO_REF, d.new_ref == NO_REF
+    kind = (
+        dto.ChangeKind.ADDED
+        if added
+        else dto.ChangeKind.REMOVED
+        if removed
+        else dto.ChangeKind.MODIFIED
+    )
+    return dto.VarChange(
+        frame_id=d.frame_id,
+        name=_name(strings, d.name_id),
+        kind=kind,
+        old=None if added else _preview_of(ctx, d.old_ref),
+        new=None if removed else _preview_of(ctx, d.new_ref),
+    )
+
+
+def _preview_of(ctx: QueryContext, ref: int) -> str | None:
+    """A ref's clipped preview, or None if the pool has lost it (a corrupt recording)."""
+    from chronotrace.reconstruct import MissingValue
+
+    try:
+        return _inspect(ctx.resolver.resolve(ref))[0]
+    except MissingValue:
+        return None
 
 
 # -- value expansion --------------------------------------------------------------------
