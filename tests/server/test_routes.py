@@ -10,6 +10,7 @@ budget, and the real-scale number is the harness's job.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import time
 from pathlib import Path
 from typing import Any, cast
@@ -20,6 +21,7 @@ from fastapi.testclient import TestClient
 from chronotrace.query import QueryContext
 from chronotrace.server import present
 from chronotrace.server.deps import Metrics
+from chronotrace.server.routes.sessions import _read_source
 from chronotrace.server.routes.state import _reconstruct
 
 
@@ -120,6 +122,27 @@ def test_source_is_available_and_heatmapped(client: TestClient, session_id: str)
     assert source["available"] is True  # the on-disk file still matches the recorded hash
     assert source["lines"]
     assert any(entry["count"] > 0 for entry in source["heatmap"])
+
+
+def test_source_serves_the_current_file_but_flags_heatmap_alignment(tmp_path: Path) -> None:
+    src = tmp_path / "prog.py"
+    src.write_bytes(b"a = 1\nb = 2\n")
+    digest = hashlib.sha256(src.read_bytes()).hexdigest()
+
+    # hash matches -> lines, and the heatmap aligns
+    assert _read_source(str(src), digest) == (["a = 1", "b = 2"], True)
+
+    # the file changed since recording -> lines STILL served (show the current file), but the
+    # heatmap must not be overlaid: a wrong line is worse than no line
+    lines, available = _read_source(str(src), "0" * 64)
+    assert lines == ["a = 1", "b = 2"]
+    assert available is False
+
+    # no recorded hash (an exec'd <string>, unreadable at record time) -> lines, no alignment
+    assert _read_source(str(src), None) == (["a = 1", "b = 2"], False)
+
+    # the file is gone since recording -> nothing to show
+    assert _read_source(str(tmp_path / "missing.py"), digest) == ([], False)
 
 
 def test_calltree(client: TestClient, session_id: str) -> None:

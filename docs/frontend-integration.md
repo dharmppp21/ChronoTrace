@@ -50,6 +50,36 @@ Vite's proxy must forward `/api` **and** upgrade the WebSocket (`ws: true`) for
 the server is started with `--ui-origin` matching it — the WS validates `Origin` by hand because
 browsers do not apply CORS to WebSocket handshakes.
 
+## Source panel (day 36) — the backend contract
+
+`GET /api/sessions/{id}/source?file=<name>` returns `Source { file, lines, heatmap, available }`:
+
+- **`lines`** is the file on disk *now* (the recording stores only a hash, not the text), empty
+  only when the file is gone since recording.
+- **`heatmap`** is `[{ lineno, count }]` for the lines that ran — the day-27 line index. Counts
+  are **raw**; the log scale and the on-hover raw count are the panel's job (a linear scale
+  renders every line except the hottest loop as identically cold). A real code line **absent**
+  from the heatmap is "recorded but never ran" — the panel knows it is real code because it has
+  the source. *The never-taken branch is the panel's most valuable pixel.*
+- **`available`** says whether the heatmap's line numbers align to `lines`. `True` → overlay it.
+  `False` → the file changed since recording (or was never hashed): **show the current source but
+  withhold the heatmap overlay + a "source changed" banner.** A wrong line is worse than no line.
+  `lines` empty + `available: false` → the file is gone; show "source unavailable".
+
+**Recorded vs not-recorded is a file-level signal:** a file not in the recording (out of scope,
+day-9 filtering) returns **404 `not_found`** — render it as *not recorded*, distinct from a
+recorded file's line that *never ran* (200, absent from the heatmap). Those are different facts.
+*(A never-executed line leaves no trace, so within a partially-scoped file the two cannot be told
+apart — a property of omniscient recording, not a gap; the file-level signal is the honest one.)*
+
+**Current file + executing line** come from `/state`: `frames[].file` and `frames[].lineno` for
+the current frame drive which file to fetch and which line to highlight.
+
+**Gutter click → retroactive breakpoint** uses the existing query endpoint, no new backend:
+`POST /api/sessions/{id}/query` with `{ "name": "break", "args": { "file": "<name>", "lineno": N } }`
+returns a `QueryResult` whose `hits[].seq` are the jump-to instants. This is the panel's hero
+interaction — a breakpoint set on a program that already finished.
+
 ## Production build
 
 ```bash

@@ -185,9 +185,11 @@ class LineHeat:
 class Source:
     """`GET /api/sessions/{id}/source?file=` -- source text with a per-line execution heatmap.
 
-    `available` is False when the recording's source hash (format 1.7) does not match the file
-    on disk, or the file is gone: the UI shows the heatmap over "source unavailable" rather
-    than lines that may be a different program.
+    `lines` is the file on disk *now* (empty only when it is gone). `available` says whether the
+    heatmap's line numbers align to those lines: True when the recording's source hash (format
+    1.7) still matches, False when the file changed since recording or was never hashed. On
+    False the UI shows the current source but withholds the heatmap overlay -- a wrong line is
+    worse than no line.
     """
 
     file: str

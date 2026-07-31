@@ -199,8 +199,9 @@ def _child(key: str, v: Any) -> dto.ValueChild:
 def source(path: str, lines: list[str], heat: dict[int, int], available: bool) -> dto.Source:
     """Source text with its per-line heatmap.
 
-    `available` is False when the on-disk file no longer matches the recording's hash -- the UI
-    then draws the heatmap over a placeholder, never over lines that may be a different program.
+    `available` is False when the heatmap cannot be trusted to align -- the on-disk file changed
+    since recording, or was never hashed. The lines are still the current file (so the UI can
+    show them); the UI just does not overlay a heatmap keyed to different code.
     """
     return dto.Source(
         file=path,

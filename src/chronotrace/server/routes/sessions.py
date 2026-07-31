@@ -73,9 +73,10 @@ def get_source(
 ) -> Response:
     """Source text plus its per-line execution heatmap.
 
-    The text comes from disk -- the recording stores only a source *hash* (format 1.7) -- and
-    is served only when that hash still matches, so the heatmap is never drawn over lines
-    that may be a different program.
+    The text comes from disk (the recording stores only a source *hash*, format 1.7). The
+    current file is always served when readable; `available` says whether the heatmap aligns to
+    it -- False when the file changed since recording -- so the UI can show the code and simply
+    withhold the overlay rather than paint the heatmap over a different program.
     """
     etag = f'"{store.fingerprint(session_id)}-source-{file}"'
     return cached(request, etag, lambda: _source(ctx, file))
@@ -104,17 +105,19 @@ def _source(ctx: QueryContext, file: str) -> dto.Source:
 
 
 def _read_source(path: str, recorded_hash: str | None) -> tuple[list[str], bool]:
-    """The file's lines and whether they can be trusted -- read once, hashed, decoded.
+    """The file's current lines, and whether the heatmap aligns to them -- read once, hashed.
 
-    Trusted only when the recording carried a hash for this file *and* the bytes on disk
-    still match it. No hash (an `exec`'d `<string>`, an unreadable file at record time) or a
-    changed file both read as untrusted, and the lines are withheld so the UI shows a
-    placeholder rather than the wrong source.
+    The text is the file on disk *now*; the recording stores only a hash of it (format 1.7),
+    not the text. `available` is True only when that hash is present and still matches -- then
+    the heatmap's line numbers line up with these lines. On a mismatch (the file changed since
+    recording) or no hash (`exec`'d `<string>`, an unreadable file at record time) the lines
+    are still returned, so the UI can show the current file, but `available` is False so it does
+    not overlay a heatmap aligned to *different* code -- a wrong line is worse than no line. A
+    file gone since recording yields no lines at all.
     """
     try:
         raw = Path(path).read_bytes()
     except OSError:
-        return [], False
-    if recorded_hash is None or hashlib.sha256(raw).hexdigest() != recorded_hash:
-        return [], False
-    return raw.decode("utf-8", "replace").splitlines(), True
+        return [], False  # the file is gone since recording -- nothing to show
+    available = recorded_hash is not None and hashlib.sha256(raw).hexdigest() == recorded_hash
+    return raw.decode("utf-8", "replace").splitlines(), available
