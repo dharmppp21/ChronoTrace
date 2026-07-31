@@ -145,6 +145,30 @@ def test_source_serves_the_current_file_but_flags_heatmap_alignment(tmp_path: Pa
     assert _read_source(str(tmp_path / "missing.py"), digest) == ([], False)
 
 
+def test_diff_reports_variable_changes_from_deltas(client: TestClient, session_id: str) -> None:
+    count = _meta(client, session_id)["event_count"]
+    kinds: set[str] = set()
+    total_mods: list[dict[str, Any]] = []
+    for seq in range(count):
+        body = client.get(f"/api/sessions/{session_id}/diff", params={"seq": seq}).json()
+        assert body["seq"] == seq
+        for change in body["changes"]:
+            kinds.add(change["kind"])
+            if change["name"] == "total" and change["kind"] == "modified":
+                total_mods.append(change)
+    assert "added" in kinds  # `total = 0` (and other locals) are creations
+    assert "modified" in kinds  # `total += quadruple(i)` changes it
+    assert total_mods, "the loop's accumulation of `total` must show as a modification"
+    assert all(c["old"] is not None and c["new"] is not None for c in total_mods)
+    assert all(c["old"] != c["new"] for c in total_mods)  # a real change, old -> new
+
+
+def test_obj_id_surfaces_object_identity_only_where_it_exists() -> None:
+    assert present._obj_id({"$": "obj", "type": "Foo", "id": 7}) == 7  # a custom object: badge-able
+    assert present._obj_id({"$": "list", "items": []}) is None  # dict/list carry no id (#9)
+    assert present._obj_id(42) is None  # an atom is not an object
+
+
 def test_calltree(client: TestClient, session_id: str) -> None:
     tree = client.get(
         f"/api/sessions/{session_id}/calltree", params={"seq": _mid_seq(client, session_id)}
