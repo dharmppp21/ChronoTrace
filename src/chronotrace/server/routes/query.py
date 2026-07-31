@@ -27,6 +27,17 @@ if TYPE_CHECKING:
 router = APIRouter()
 
 
+@router.get("/api/queries", response_model=list[dto.QueryDescriptor])
+def list_queries() -> JSONResponse:
+    """Every query the engine offers, with its argument schema, so the UI builds forms from it.
+
+    Global, not per-session: the catalogue is the same for every recording. The day-28 registry
+    makes it enumerable without running anything -- add a query there and it appears here, and in
+    the panel, with no frontend change. That decoupling is the endpoint's whole reason to exist.
+    """
+    return json_dto(present.query_catalog())
+
+
 @router.post("/api/sessions/{session_id}/query", response_model=dto.QueryResult)
 def run_query(body: dto.QueryRequest, ctx: QueryContext = Depends(get_context)) -> JSONResponse:
     """Run one registered query and return a page of instants.
