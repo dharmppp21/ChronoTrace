@@ -114,6 +114,121 @@ until #9 is solved (which is hard: a stable id for a dict/list without retaining
 args:{name}}` = every write to it; `{name:"provenance", args:{name, seq}}` = where its value came
 from; `{name:"watch", args:{name}}` = every instant it changed. Each returns `hits[].seq` jumps.
 
+## Call tree panel (day 38) — the backend contract
+
+A normal debugger shows the call *stack*: the frames alive right now. ChronoTrace has the whole
+recording, so it can show the call *tree* — **every call the program ever made** — with the
+current stack highlighted inside it. That is the one-sentence superpower: click a function that
+returned 200,000 events ago and *go there*. No live Python debugger can, because there is nothing
+left to run.
+
+Both a `CallFrame` node carries the same shape in either mode:
+`{ frame_id, function, file, entry_seq, exit_seq, exit_kind, parent_frame_id }`.
+
+- **`entry_seq`** is the call instant — clicking the node sets `currentSeq` to it (every panel then
+  follows, because the UI is a pure function of `currentSeq`).
+- **`exit_seq`** is where the frame left — the **jump-to-return** target, and with `entry_seq` the
+  call's event span. `null` when the frame never returned.
+- **`exit_kind` ∈ `{returned, raised, open}`.** `raised` is a frame CPython unwound because of an
+  exception (day-6's UNWIND) — **colour it** (red); it is the one-glance answer to "where did it
+  blow up?". `open` is a frame that never returned in the recording (`exit_seq` null): still live
+  at the end, a suspended generator, or a crash-truncated tail — not an error, just not-yet-returned.
+  Note the time-travel twist: even a frame *live at the current instant* carries its **eventual**
+  `exit_kind`, so the tree can foretell that the frame you are paused in will be unwound.
+- **`parent_frame_id`** is the caller — **jump to caller** navigates to that node (at this frame's
+  `entry_seq`, the parent is the executing frame). `null` marks a forest root.
+
+### Two modes
+
+- **Stack mode** — `GET /api/sessions/{id}/calltree?seq=` → the frames **live at `seq`**, outermost
+  first (`next_cursor` is always null; a stack is bounded by call depth). This is the familiar view
+  users reach for. One indexed range query (day-27 `ix_frames_entry`).
+- **Tree mode** — `GET /api/sessions/{id}/calltree/children?parent=<frame_id>&after=<entry_seq>` →
+  one page of a frame's **direct children**, in call order. Omit `parent` to get the **forest roots**
+  (where the tree bootstraps). `next_cursor` is the `entry_seq` to resume `after` (null = last page).
+  Expand one level per click; **lazy children fall straight out of day-27's `ix_frames_parent`** — no
+  new backend, which is the reward for that day's interval encoding.
+
+Render the current path (the stack from `/calltree?seq=currentSeq`) highlighted and auto-expanded
+inside the tree; expand the rest lazily as the user opens nodes.
+
+### Edge cases (all are the frontend's to render; the backend already answers them)
+
+- **A 1M-node tree** — virtualise the DOM (render only visible rows) and lazy-load children a page at
+  a time. The pagination cap is 1000 nodes/response; the default page is 100.
+- **1000-deep recursion** — `parent_frame_id` chains arbitrarily deep; the backend imposes no limit, so
+  **cap the visual indentation** and indicate the clip, or it runs off the screen.
+- **A frame that never returned** — `exit_seq: null`, `exit_kind: "open"` (a truncated recording, or a
+  frame still live at the end). Render "did not return", not a zero-length call.
+- **A suspended generator — *live* vs *executing*.** Stack mode returns every frame **live** at `seq`,
+  which under generators/async includes frames that are suspended and *not executing*. The executing
+  path is the ancestry of `/state`'s `current_frame_id`; a live frame that is **not** on that path is
+  live-but-not-executing (a suspended generator) — render it distinctly (dimmed). `/state`'s per-frame
+  `suspended` flag is the same signal for the frame the playhead sits in. This live-vs-executing
+  distinction (day 27) is exactly what becomes *visible* in this panel.
+- **Async: many concurrent "current" frames** — several frames can be live at once. *The* current
+  stack is defined as the ancestry of `current_frame_id`; say so in the UI, and show the other live
+  frames as concurrent (not as your stack).
+
+## Query panel (day 38) — the backend contract
+
+This is where ChronoTrace's novel contribution — retroactive breakpoints, exception origins,
+provenance, watchpoints — becomes a thing a stranger can *use* rather than read the docs to find.
+
+### Forms come from the registry — never hardcode a query
+
+`GET /api/queries` → `QueryDescriptor[]`, each `{ name, summary, args: ArgSpec[] }` with
+`ArgSpec = { name, type, required }`. `type` is a wire type name (`"string"`, `"integer"`); build the
+input from it, mark `required` fields, and label with `name`/`summary`. **The API describes its own
+queries**, introspected from each query's constructor, so a query added on the backend appears in the
+panel with its form and **zero frontend change**. Hardcoding the query list here is the one mistake
+that makes every future query need frontend work — don't. Today's set: `var-writes`, `line-hits`,
+`last-write`, `break` (retroactive breakpoint, with the optional `condition` = the `--if` box),
+`exception-origin`, `provenance`, `watch`, `callers-of`, `call-tree`.
+
+### Running a query, and making results feel like time travel
+
+`POST /api/sessions/{id}/query` with `{ name, args, cursor?, limit? }` → `QueryResult
+{ hits, next_cursor, partial }`. Each `hit` is `{ seq, file?, lineno?, function?, value_preview?,
+note? }` — **`seq` is the answer**, the rest is just enough to choose *which* instant before you
+commit.
+
+- **Hover previews, click jumps.** On hover, `GET /state?seq=<hit.seq>` to peek the instant (it is
+  preview-only, threadpooled and cancels on disconnect, so peeking is cheap and does not move the
+  playhead). On click, set `currentSeq = hit.seq`. Scanning 40 hits by hovering is how a user finds
+  "the one" without losing their place — and losing your place is what makes debugging exhausting.
+- **Paginate, never render 10M.** `next_cursor` → pass it back as `cursor` for the next page. A hot
+  loop's line has millions of hits; the page is the bound.
+- **`partial: true`** means the recording is crash-truncated and the answer covers only what survived
+  — show it; silently under-reporting is the one thing a debugger must not do.
+- **Cancel a slow query** by abandoning the request (the client aborts the fetch); each page is
+  bounded work, so there is no unbounded scan to stop.
+
+### Zero results are two different facts — honour the distinction
+
+- **200 with empty `hits`** = the query ran and found nothing (e.g. *no writes* to a real variable).
+- **404 `not_found`** = the name/file/function was **never recorded** (a typo, not an empty result) —
+  day-28 keeps "there is no `total`" distinct from "`total` never changed". Show different messages.
+- **400 `unknown_query`** = no query registered under that name.
+
+### Errors that teach
+
+A bad condition on the `break` query comes back **400 `bad_request`** (bad input — *not* a misleading
+404), and its `detail` is written to teach:
+
+- A **syntax error** (`i >`) → the parser's message with a **column** for a caret at the offending
+  character.
+- A **call** (`foo()`) → "function calls are not allowed in a condition …" plus **why**: a condition
+  is a pure test over recorded values, never code that runs (day-30's security rule). An error that
+  explains the rule is documentation delivered exactly when it is needed — render `detail` under the
+  condition box.
+
+### Right-click a variable → these same queries (no new backend)
+
+From the variables panel: `{name:"var-writes", args:{name}}`, `{name:"provenance", args:{name, seq}}`,
+`{name:"watch", args:{name}}`; from the source gutter: `{name:"break", args:{file, lineno}}` (+
+`condition`). All return `hits[].seq` jumps, rendered by the same results list.
+
 ## Production build
 
 ```bash
