@@ -249,22 +249,50 @@ class Source:
 # -- call tree --------------------------------------------------------------------------
 
 
+class ExitKind(enum.Enum):
+    """How a frame ended -- the single most useful thing a call tree colours.
+
+    `raised` is a frame CPython unwound because of an exception (day-6's UNWIND), painted
+    distinctly so the tree answers "where did it blow up?" at a glance. `open` is a frame that
+    never returned in the recording -- still live at the end, a suspended generator, or a
+    crash-truncated tail (`exit_seq IS NULL`); not an error, just not-yet-returned.
+    """
+
+    RETURNED = "returned"
+    RAISED = "raised"
+    OPEN = "open"
+
+
 @dataclass(frozen=True, slots=True)
 class CallFrame:
-    """One node of the call tree -- resolved function name, its call instant, its parent."""
+    """One node of the call tree -- function, its call and return instants, its parent, its fate.
+
+    `exit_seq` is where the frame left (RETURN/UNWIND): the jump-to-return target, and with
+    `entry_seq` the event span of the call. `None` when the frame never returned (`exit_kind`
+    is then `open`). Even a frame still live at the current instant carries its *eventual* exit
+    -- the recording is complete, so the tree can show a live frame's future fate.
+    """
 
     frame_id: int
     function: str
     file: str
     entry_seq: int
+    exit_seq: int | None
+    exit_kind: ExitKind
     parent_frame_id: int | None
 
 
 @dataclass(frozen=True, slots=True)
 class CallTree:
-    """`GET /api/sessions/{id}/calltree?seq=` -- the frames live at `seq`, or a frame's subtree."""
+    """`GET /api/sessions/{id}/calltree` -- frames live at `seq`, or one frame's direct children.
+
+    `next_cursor` is set only in children mode (`?parent=&after=`): a busy frame can have
+    millions of direct calls, so children page exactly as a query does; `None` means stack mode
+    or the last page. Stack mode is bounded by call depth and never pages.
+    """
 
     frames: tuple[CallFrame, ...]
+    next_cursor: int | None = None
 
 
 # -- query ------------------------------------------------------------------------------
@@ -304,6 +332,33 @@ class QueryResult:
     hits: tuple[QueryHit, ...]
     next_cursor: int | None
     partial: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ArgSpec:
+    """One argument of a query, so a client builds its form field without hardcoding it.
+
+    `type` is the wire type name (`"string"`, `"integer"`) the UI maps to an input; `required`
+    is whether the query's constructor demands it (has no default). Derived by introspecting the
+    query's dataclass fields, so it cannot drift from what the query actually accepts.
+    """
+
+    name: str
+    type: str
+    required: bool
+
+
+@dataclass(frozen=True, slots=True)
+class QueryDescriptor:
+    """`GET /api/queries` -- one registered query, so the UI builds its form from the API itself.
+
+    The day-28 registry paying off: add a query on the backend and it appears in the query panel
+    with its inputs, no frontend change. The API describes its own queries.
+    """
+
+    name: str
+    summary: str
+    args: tuple[ArgSpec, ...]
 
 
 # -- stepping ---------------------------------------------------------------------------

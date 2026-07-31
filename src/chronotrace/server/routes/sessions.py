@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import Response
 
-from chronotrace.index import heatmap, profile, stack_at
+from chronotrace.index import child_frames, heatmap, profile, stack_at
 from chronotrace.query._resolve import resolve_file
 from chronotrace.server import dto, present
 from chronotrace.server.deps import SessionStore, get_context, get_store
@@ -90,12 +90,54 @@ def get_calltree(
     ctx: QueryContext = Depends(get_context),
     store: SessionStore = Depends(get_store),
 ) -> Response:
-    """The frames live at `seq`, each with its parent so the UI can nest them."""
+    """Stack mode: the frames live at `seq`, each with its parent so the UI can nest them.
+
+    A call *stack*, the familiar view. The call *tree* -- every call the program ever made --
+    is the children endpoint below, expanded lazily one frame at a time.
+    """
     validate_seq(ctx.reader, seq)
     etag = f'"{store.fingerprint(session_id)}-calltree-{seq}"'
     return cached(
         request, etag, lambda: present.call_tree(stack_at(ctx.db, seq), ctx.reader.strings())
     )
+
+
+_CHILD_PAGE = 100
+"""Direct children returned per page in tree mode. The virtualised tree renders a screenful and
+pages with the cursor, so a fixed default is right; a client may ask for fewer/more up to..."""
+_CHILD_PAGE_MAX = 1000
+"""...this cap, so a bad `limit` cannot pull a million-child frame into one response."""
+
+
+@router.get("/api/sessions/{session_id}/calltree/children", response_model=dto.CallTree)
+def get_calltree_children(
+    session_id: str,
+    request: Request,
+    parent: int | None = None,
+    after: int = -1,
+    limit: int = _CHILD_PAGE,
+    ctx: QueryContext = Depends(get_context),
+    store: SessionStore = Depends(get_store),
+) -> Response:
+    """Tree mode: one page of a frame's direct children, for lazy expansion of the call tree.
+
+    This is the whole call tree, one level at a time -- click a call that returned 200k events
+    ago and go there. `parent` omitted returns the forest *roots*, where the tree starts.
+    Immutable per `(parent, after, limit)`: a finished recording's tree is fixed forever. An
+    unknown `parent` simply has no children (an empty page), not an error.
+    """
+    limit = max(1, min(limit, _CHILD_PAGE_MAX))
+    etag = f'"{store.fingerprint(session_id)}-children-{parent}-{after}-{limit}"'
+    return cached(request, etag, lambda: _children(ctx, parent, after, limit))
+
+
+def _children(ctx: QueryContext, parent: int | None, after: int, limit: int) -> dto.CallTree:
+    """Fetch one child page and derive its next cursor -- one extra row answers "is there more?"."""
+    rows = child_frames(ctx.db, parent, after, limit + 1)
+    more = len(rows) > limit
+    kept = rows[:limit]
+    cursor = kept[-1][2] if more and kept else None  # resume after the last child's entry_seq
+    return present.call_tree(kept, ctx.reader.strings(), next_cursor=cursor)
 
 
 def _source(ctx: QueryContext, file: str) -> dto.Source:

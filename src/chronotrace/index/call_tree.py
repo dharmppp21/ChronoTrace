@@ -57,6 +57,7 @@ interval-based implementation is kept there purely to demonstrate that it disagr
 from __future__ import annotations
 
 import sqlite3
+from typing import Any
 
 from chronotrace.index.db import Batcher
 from chronotrace.recorder.events import Event, EventKind
@@ -161,22 +162,70 @@ def live_at(connection: sqlite3.Connection, seq: int) -> list[tuple[int, int, in
     ]
 
 
-def stack_at(connection: sqlite3.Connection, seq: int) -> list[tuple[int, int, int, int | None]]:
-    """Every frame live at `seq` with its parent: `(frame_id, code_id, entry_seq, parent)`.
+_FRAME_COLS = "frame_id, code_id, entry_seq, parent_frame_id, exit_seq, exit_kind"
+"""The full frame row the server's call-tree panel renders. One column list, so stack mode and
+children mode select the same shape and one presenter maps both."""
 
-    `live_at` plus the `parent_frame_id` the call-stack panel needs to nest the live frames
-    into a tree. Kept separate from `live_at` so that query's callers -- which want liveness
-    only and unpack a 3-tuple -- are not handed a column they discard. Same half-open
-    predicate, same outermost-first order.
+FrameRow = tuple[int, int, int, int | None, int | None, int | None]
+"""`(frame_id, code_id, entry_seq, parent, exit_seq, exit_kind)`. `exit_seq`/`exit_kind` are
+NULL for a frame that never returned; `exit_kind` is the `EventKind` of the exit (RETURN/UNWIND)."""
+
+
+def _frame_row(row: tuple[Any, ...]) -> FrameRow:
+    fid, code_id, entry, parent, exit_seq, exit_kind = row
+    return (
+        int(fid),
+        int(code_id),
+        int(entry),
+        None if parent is None else int(parent),
+        None if exit_seq is None else int(exit_seq),
+        None if exit_kind is None else int(exit_kind),
+    )
+
+
+def stack_at(connection: sqlite3.Connection, seq: int) -> list[FrameRow]:
+    """Every frame live at `seq`, richest form (`FrameRow`), outermost first -- the call stack.
+
+    `exit_seq`/`exit_kind` are the frame's *eventual* fate (the recording is complete), so a
+    live frame shows where it will return and whether it will be unwound -- foresight only a
+    time-travel debugger has. Server-only; the liveness-only callers use `live_at` and unpack a
+    3-tuple, so they are not handed columns they discard.
 
     Complexity: O(log n + live) via `ix_frames_entry`, one range scan.
     """
     return [
-        (int(f), int(c), int(e), None if p is None else int(p))
-        for f, c, e, p in connection.execute(
-            "SELECT frame_id, code_id, entry_seq, parent_frame_id FROM frames "
+        _frame_row(r)
+        for r in connection.execute(
+            f"SELECT {_FRAME_COLS} FROM frames "  # noqa: S608 -- _FRAME_COLS is a constant
             "WHERE entry_seq <= ? AND (exit_seq > ? OR exit_seq IS NULL) ORDER BY entry_seq",
             (seq, seq),
+        )
+    ]
+
+
+def child_frames(
+    connection: sqlite3.Connection, parent_frame_id: int | None, after: int, limit: int
+) -> list[FrameRow]:
+    """One page of a frame's direct children in call order after `after` -- tree-mode lazy load.
+
+    `parent_frame_id=None` returns the forest *roots* (frames with no parent), which is how the
+    tree bootstraps before any frame is expanded. `IS ?` (not `=`) is what makes one query serve
+    both: it is NULL-safe, so a bound NULL matches roots and a bound id matches that frame's
+    children -- both still an indexed seek on `ix_frames_parent`.
+
+    The paginating counterpart to `stack_at`, same rich `FrameRow` so one presenter maps both. A
+    busy frame has millions of direct calls, so children come a page at a time (`after` a seq
+    cursor), never the whole forest. `after = -1` starts. This is the "lazy children fall out of
+    day-27" reward: no new index, just a scan.
+
+    Complexity: O(log n + limit) via `ix_frames_parent`.
+    """
+    return [
+        _frame_row(r)
+        for r in connection.execute(
+            f"SELECT {_FRAME_COLS} FROM frames "  # noqa: S608 -- _FRAME_COLS is a constant
+            "WHERE parent_frame_id IS ? AND entry_seq > ? ORDER BY entry_seq LIMIT ?",
+            (parent_frame_id, after, limit),
         )
     ]
 

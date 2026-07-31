@@ -47,6 +47,8 @@ from pathlib import Path
 
 from chronotrace.index.call_tree import (
     CallTreeIndexer,
+    FrameRow,
+    child_frames,
     children_of,
     descendants_of,
     live_at,
@@ -64,12 +66,14 @@ __all__ = [
     "Cancelled",
     "DensityIndexer",
     "ExceptionIndexer",
+    "FrameRow",
     "Indexer",
     "LineHitIndexer",
     "Progress",
     "Result",
     "VarWriteIndexer",
     "build_index",
+    "child_frames",
     "children_of",
     "descendants_of",
     "heatmap",

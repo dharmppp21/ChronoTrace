@@ -26,14 +26,18 @@ tree only when `/value` is called for it.
 
 from __future__ import annotations
 
+import dataclasses
 from typing import TYPE_CHECKING, Any
 
+from chronotrace.query import registry
 from chronotrace.query._resolve import MAX_PREVIEW_CHARS, render_captured
 from chronotrace.reconstruct import Edge
+from chronotrace.recorder.events import EventKind
 from chronotrace.server import dto
 from chronotrace.store.delta import NO_REF, DeltaKind
 
 if TYPE_CHECKING:
+    from chronotrace.index import FrameRow
     from chronotrace.query import Hit, QueryContext
     from chronotrace.query import QueryResult as EngineQueryResult
     from chronotrace.reconstruct import ExceptionState, FrameState, ProgramState
@@ -269,8 +273,23 @@ def source(path: str, lines: list[str], heat: dict[int, int], available: bool) -
     )
 
 
-def call_tree(rows: list[tuple[int, int, int, int | None]], strings: Strings) -> dto.CallTree:
-    """The frames live at an instant, each with its parent so the UI can nest them."""
+_EXIT_KIND: dict[int, dto.ExitKind] = {
+    int(EventKind.RETURN): dto.ExitKind.RETURNED,
+    int(EventKind.UNWIND): dto.ExitKind.RAISED,
+}
+"""The stored `exit_kind` int (an `EventKind`) to its wire form. Absent (`None`) -> a frame that
+never returned -> `OPEN`; RETURN -> `returned`; UNWIND -> `raised` (day-6's abnormal exit)."""
+
+
+def call_tree(
+    rows: list[FrameRow], strings: Strings, next_cursor: int | None = None
+) -> dto.CallTree:
+    """Frames (live at an instant, or a frame's children) as nestable, colourable nodes.
+
+    Each row carries `exit_seq`/`exit_kind`, so the panel shows the call's span, its return
+    target, and whether it was unwound by an exception -- one node shape for stack and tree mode.
+    `next_cursor` pages children; it is None for stack mode and the last page.
+    """
     return dto.CallTree(
         frames=tuple(
             dto.CallFrame(
@@ -278,11 +297,62 @@ def call_tree(rows: list[tuple[int, int, int, int | None]], strings: Strings) ->
                 function=_qualname(strings, code_id),
                 file=_filename(strings, code_id),
                 entry_seq=entry,
+                exit_seq=exit_seq,
+                exit_kind=dto.ExitKind.OPEN if exit_kind is None else _EXIT_KIND[exit_kind],
                 parent_frame_id=parent,
             )
-            for fid, code_id, entry, parent in rows
-        )
+            for fid, code_id, entry, parent, exit_seq, exit_kind in rows
+        ),
+        next_cursor=next_cursor,
     )
+
+
+def query_catalog() -> list[dto.QueryDescriptor]:
+    """Every registered query with its argument schema, so the UI builds forms from the API.
+
+    Arg specs come from each query's dataclass fields -- the one source of truth for what a
+    query accepts, so a form can never drift from the constructor. Loading the query classes
+    imports their modules (the registry stays lazy for `--list`; this endpoint pays it once).
+    """
+    summaries = registry.summaries()
+    return [
+        dto.QueryDescriptor(
+            name=name, summary=summaries[name], args=_arg_specs(registry.load(name))
+        )
+        for name in registry.names()
+    ]
+
+
+_WIRE_TYPE = {"str": "string", "int": "integer"}
+
+
+def _arg_specs(query_cls: type) -> tuple[dto.ArgSpec, ...]:
+    """A query's constructor arguments as form specs.
+
+    Empty only if it is not a dataclass -- which no registered query is; the guard is what lets
+    `dataclasses.fields` type-check.
+    """
+    if not dataclasses.is_dataclass(query_cls):
+        return ()
+    return tuple(
+        dto.ArgSpec(name=f.name, type=_wire_type(f.type), required=_is_required(f))
+        for f in dataclasses.fields(query_cls)
+    )
+
+
+def _is_required(field: dataclasses.Field[Any]) -> bool:
+    return field.default is dataclasses.MISSING and field.default_factory is dataclasses.MISSING
+
+
+def _wire_type(annotation: object) -> str:
+    """A field annotation to a wire type name.
+
+    `str | None` -> `string`; `required` carries the optionality. An unmapped type passes through,
+    so a new arg type is shown, never silently lost.
+    """
+    name = annotation if isinstance(annotation, str) else getattr(annotation, "__name__", "")
+    base = str(name).replace(" | None", "").replace("None | ", "").strip()
+    return _WIRE_TYPE.get(base, base)
 
 
 # -- stepping + query -------------------------------------------------------------------
