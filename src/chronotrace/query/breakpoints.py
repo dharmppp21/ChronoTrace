@@ -41,13 +41,12 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
 from chronotrace.query._resolve import name_id, resolve_file
-from chronotrace.query.expr import ConditionError, compile_condition
+from chronotrace.query.expr import compile_condition
 from chronotrace.query.types import (
     PAGE_SIZE,
     Cursor,
     Hit,
     QueryContext,
-    QueryError,
     QueryResult,
     UnknownName,
     after_bound,
@@ -84,7 +83,11 @@ class RetroBreakpointQuery:
     def execute(
         self, ctx: QueryContext, cursor: Cursor | None = None, *, limit: int = PAGE_SIZE
     ) -> QueryResult:
-        """One page of hits. Raises `UnknownFile`, or `QueryError` for a bad condition."""
+        """One page of hits.
+
+        Raises `UnknownFile`, or a `ConditionError` (a `QueryError` the server maps to 400) for a
+        malformed or forbidden condition.
+        """
         file_id, path = resolve_file(ctx.db, self.file)
         after = after_bound(cursor)
         if self.condition is None:
@@ -100,11 +103,13 @@ class RetroBreakpointQuery:
     def _conditional(
         self, ctx: QueryContext, file_id: int, path: str, after: int, limit: int
     ) -> QueryResult:
-        """Scan hits lazily, evaluating the condition with pushdown, until `limit` matches."""
-        try:
-            cond = compile_condition(self.condition or "")
-        except ConditionError as exc:
-            raise QueryError(str(exc)) from exc
+        """Scan hits lazily, evaluating the condition with pushdown, until `limit` matches.
+
+        A malformed condition raises `ConditionError` from `compile_condition` -- let it
+        propagate so the server maps its *type* to a 400 with the parser's teaching message,
+        rather than flattening it into a generic query failure.
+        """
+        cond = compile_condition(self.condition or "")
         ids = {name: nid for name in cond.names if (nid := _maybe_id(ctx.db, name)) is not None}
         var_ids = list(ids.values())
         hits: list[Hit] = []

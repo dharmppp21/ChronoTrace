@@ -39,17 +39,22 @@ import operator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from chronotrace.query.types import QueryError
+
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
     from chronotrace.recorder.capture import CapturedValue
 
 
-class ConditionError(Exception):
+class ConditionError(QueryError):
     """The condition is not valid: a syntax error, or a construct outside the grammar.
 
-    Carries the offending position so the CLI can point at it. Raised at *compile* time, so
-    a forbidden construct never reaches evaluation -- the whitelist is a parse gate.
+    A `QueryError` because a malformed condition is a query that cannot run as asked -- but the
+    server maps it to `400 BAD_REQUEST` (the input is wrong), distinct from the `404` its
+    name-not-found siblings get. Carries the offending position (a caret column) or the rule it
+    broke, so the message *teaches*: a syntax error points at the character, a forbidden call
+    explains why calls are refused.
     """
 
 
@@ -142,11 +147,29 @@ def _validate(tree: ast.Expression) -> None:
     """Reject any node type outside the grammar, or an underscore name/attribute (dunders)."""
     for node in ast.walk(tree):
         if not isinstance(node, _ALLOWED):
-            raise ConditionError(f"{type(node).__name__} is not allowed in a condition")
+            raise ConditionError(_forbidden(node))
         if isinstance(node, ast.Attribute) and node.attr.startswith("_"):
             raise ConditionError(f"attribute {node.attr!r} is not allowed (underscore access)")
         if isinstance(node, ast.Name) and node.id.startswith("__"):
             raise ConditionError(f"name {node.id!r} is not allowed (dunder)")
+
+
+def _forbidden(node: ast.AST) -> str:
+    """Why a node is refused, phrased to teach -- a call gets the security reason by name.
+
+    An error that explains the rule is documentation delivered exactly when it is needed: the
+    user typed `foo()` and learns, right there, that a condition is data and not code.
+    """
+    if isinstance(node, ast.Call):
+        return (
+            "function calls are not allowed in a condition: a condition is a pure test over "
+            "recorded values, never code that runs. Allowing a call would be arbitrary code "
+            "execution in your process -- exactly what this evaluator refuses (the day-30 rule)"
+        )
+    return (
+        f"{type(node).__name__} is not allowed in a condition -- only comparisons, boolean and "
+        "arithmetic operators, literals, and index/attribute lookups over recorded values are"
+    )
 
 
 def _free_names(tree: ast.Expression) -> frozenset[str]:

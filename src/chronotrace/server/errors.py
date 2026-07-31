@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING, cast
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
-from chronotrace.query import QueryError
+from chronotrace.query import ConditionError, QueryError
 from chronotrace.reconstruct import MissingValue
 from chronotrace.server import dto
 from chronotrace.store.errors import (
@@ -66,6 +66,9 @@ _ENGINE_MAPPING: tuple[tuple[type[BaseException], dto.ErrorCode], ...] = (
     (TruncatedRecording, dto.ErrorCode.CORRUPT),
     (CorruptRecording, dto.ErrorCode.CORRUPT),
     (ChronoError, dto.ErrorCode.CORRUPT),  # any other unreadable recording
+    # ConditionError is a QueryError, so it MUST precede the catch-all below: a malformed
+    # condition is bad *input* (400), not a name that is missing from the recording (404).
+    (ConditionError, dto.ErrorCode.BAD_REQUEST),
     (QueryError, dto.ErrorCode.NOT_FOUND),  # a name (var/file/function) not in the recording
 )
 
