@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ChronoTrace</title>
+    <link rel="stylesheet" href="/src/style.css">
+  </head>
+  <body class="dark">
+    <div id="app">
+      <header id="header">
+        <h1>ChronoTrace</h1>
+        <div id="session-picker"></div>
+        <div id="controls">
+          <button id="btn-first">|&lt;</button>
+          <button id="btn-prev">&lt;</button>
+          <span id="step-display">Step 0</span>
+          <button id="btn-next">&gt;</button>
+          <button id="btn-last">&gt;|</button>
+          <button id="btn-help">?</button>
+        </div>
+      </header>
+
+      <div id="timeline-container">
+        <canvas id="timeline" data-testid="timeline"></canvas>
+      </div>
+
+      <main id="panels">
+        <div class="panel-col">
+          <div id="source-panel" class="panel">
+            <h2>Source</h2>
+            <div id="source-content"></div>
+          </div>
+        </div>
+
+        <div class="panel-col">
+          <div id="variables-panel" class="panel">
+            <h2>Variables</h2>
+            <div id="variables-content"></div>
+          </div>
+          <div id="calltree-panel" class="panel">
+            <h2>Call Tree</h2>
+            <div id="calltree-content"></div>
+          </div>
+        </div>
+
+        <div class="panel-col">
+          <div id="query-panel" class="panel">
+            <h2>Query</h2>
+            <div id="query-content"></div>
+          </div>
+        </div>
+      </main>
+
+      <div id="empty-state" data-testid="empty-state">
+        <div class="empty-message">
+          <h2>No Recording Open</h2>
+          <p>Please select a session to begin. Drag the timeline to travel through your program's execution.</p>
+        </div>
+      </div>
+
+      <div id="error-dialog" class="hidden">
+        <div class="error-content">
+          <h2 id="error-title">Error</h2>
+          <p id="error-detail"></p>
+          <button id="error-close">Close</button>
+        </div>
+      </div>
+
+      <div id="help-overlay" class="hidden">
+        <div class="help-content">
+          <h2>Keyboard Shortcuts</h2>
+          <ul>
+            <li><code>&larr;</code> / <code>&rarr;</code> : scrub one step back / forward</li>
+            <li><code>Home</code> / <code>End</code> : first / last instant</li>
+            <li><code>Space</code> : play / pause auto-scrub</li>
+            <li><code>n</code> / <code>p</code> : next / previous line (step into, either way)</li>
+            <li><code>o</code> / <code>O</code> : step over, forward / backward (skip nested calls)</li>
+            <li><code>f</code> / <code>F</code> : run to this frame's exit / back to its call</li>
+            <li><code>/</code> : focus the query box</li>
+            <li><code>?</code> : toggle this overlay</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
