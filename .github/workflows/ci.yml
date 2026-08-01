@@ -107,10 +107,10 @@ jobs:
         working-directory: frontend
 
   # End-to-end (Phase 5, day 39): the thinnest full-stack proof -- load a recording in the real
-  # UI, scrub, assert a variable's rendered value changes. Guarded on BOTH the frontend and the
-  # spec existing, so it is green today (skips) and enforces the moment the Antigravity UI lands.
-  # The frontend project owns playwright.config.ts, whose `webServer` starts `chronotrace serve`
-  # over the fixture recording this job records below. See tests/e2e/test_scrub.spec.ts.
+  # UI, scrub, assert the rendered variables change. Guarded on the frontend existing, so it is
+  # green today (skips) and enforces the moment the Antigravity UI lands. The frontend project
+  # owns playwright.config.ts, whose `webServer` starts `chronotrace serve` over the ./recordings
+  # fixture this job records below. See frontend/tests/e2e/test_scrub.spec.ts.
   e2e:
     name: e2e
     runs-on: ubuntu-latest
@@ -130,24 +130,24 @@ jobs:
         if: hashFiles('frontend/package.json') != ''
         run: pip install -e ".[ui]"
 
-      - name: Record a fixture recording
-        if: hashFiles('frontend/package.json') != ''
-        # flags BEFORE the positional script -- argparse.REMAINDER eats everything after it
-        run: python -m chronotrace.cli record --out recordings/buggy.chrono examples/buggy_pipeline.py
-
       - name: Build the UI
         if: hashFiles('frontend/package.json') != ''
         run: npm ci && npm run build
         working-directory: frontend
 
-      - name: Install Playwright browsers
+      - name: Record the fixture the webServer serves
+        if: hashFiles('frontend/package.json') != ''
+        # into frontend/recordings, where playwright.config's `serve --dir ./recordings` looks.
+        # Flags BEFORE the positional script -- argparse.REMAINDER eats everything after it.
+        run: python -m chronotrace.cli record --out frontend/recordings/demo.chrono examples/buggy_pipeline.py
+
+      - name: Install Playwright browser
         if: hashFiles('frontend/package.json') != ''
         run: npx playwright install --with-deps chromium
         working-directory: frontend
 
       - name: Run the scrub test
         if: hashFiles('frontend/package.json') != ''
-        # Playwright's webServer (in the frontend's config) starts `chronotrace serve` over
-        # ./recordings and waits for the port before the spec runs.
-        run: npx playwright test ../tests/e2e
+        # testDir (./tests/e2e) is set in playwright.config.ts; its webServer starts the app.
+        run: npx playwright test
         working-directory: frontend
