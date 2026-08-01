@@ -137,9 +137,12 @@ jobs:
 
       - name: Record the fixture the webServer serves
         if: hashFiles('frontend/package.json') != ''
-        # into frontend/recordings, where playwright.config's `serve --dir ./recordings` looks.
-        # Flags BEFORE the positional script -- argparse.REMAINDER eats everything after it.
-        run: python -m chronotrace.cli record --out frontend/recordings/demo.chrono examples/buggy_pipeline.py
+        # into frontend/recordings (gitignored, so it does not exist on a fresh checkout -- mkdir
+        # it; record --out does not create the parent). Flags BEFORE the positional script --
+        # argparse.REMAINDER eats everything after it.
+        run: |
+          mkdir -p frontend/recordings
+          python -m chronotrace.cli record --out frontend/recordings/demo.chrono examples/buggy_pipeline.py
 
       - name: Install Playwright browser
         if: hashFiles('frontend/package.json') != ''
