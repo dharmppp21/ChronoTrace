@@ -284,11 +284,16 @@ def _open_index(
     from chronotrace.index.db import sidecar_path
     from chronotrace.index.schema import staleness
 
+    # check_same_thread=False: the day-33 server caches one QueryContext per session and reads it
+    # from FastAPI's threadpool, so the connection is used from threads other than the one that
+    # opened it. The connection is read-only after the build below (SQLite's default serialized
+    # mode makes that safe to share); without this flag the same-thread guard 500s every request
+    # that lands on a different worker thread -- which TestClient hides but real uvicorn exposes.
     path = sidecar_path(recording)
     if path.exists():
-        connection = sqlite3.connect(path)
+        connection = sqlite3.connect(path, check_same_thread=False)
         if staleness(connection, recording) is None:
             return connection
         connection.close()
     build_index(recording, reader, on_progress=on_progress)
-    return sqlite3.connect(sidecar_path(recording))
+    return sqlite3.connect(sidecar_path(recording), check_same_thread=False)

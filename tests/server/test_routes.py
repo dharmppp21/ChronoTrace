@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -455,6 +456,32 @@ def test_disconnected_client_stops_reconstruction(recordings: Path, session_id: 
             assert metrics.reconstructions == 1
 
     asyncio.run(run())
+
+
+def test_query_context_db_survives_cross_thread_use(recordings: Path, session_id: str) -> None:
+    """FastAPI runs sync routes in a threadpool, so a cached session's SQLite connection is used
+    from threads other than the one that opened it -- it must not trip SQLite's same-thread guard.
+
+    This is the `/calltree` 500 a real uvicorn showed and TestClient hid: TestClient serialises on
+    one thread, so only a genuine second thread reproduces it. Reconstruction (`/state`) reads the
+    mmap, not the db, which is why calltree/children/source were the endpoints that fell over.
+    """
+    from chronotrace.index import stack_at
+
+    with QueryContext.open(recordings / f"{session_id}.chrono") as ctx:
+        stack_at(ctx.db, 0)  # touch the db on the opening thread
+        errors: list[Exception] = []
+
+        def worker() -> None:
+            try:
+                stack_at(ctx.db, 0)  # ... and again from another thread
+            except Exception as exc:  # record whatever the same-thread guard raises
+                errors.append(exc)
+
+        thread = threading.Thread(target=worker)
+        thread.start()
+        thread.join()
+        assert not errors, f"cross-thread db use failed: {errors}"
 
 
 # -- latency smoke: /state p95 within the ADR-0010 budget on a small recording -----------
