@@ -62,3 +62,37 @@ panel. This ADR is the thing to point at in week 8.
 **Reversal trigger:** none for the "never" items (they are category decisions). For the
 "post-1.0" items, the trigger is 1.0 shipping with the scrubber demonstrably solid — earn the
 second frontend after the first one is proven, not before.
+
+## Checkpoint-5 reconciliation (day 39) — did it stay a scrubber?
+
+Honest verdict, backend side: **yes.** Every Phase-5 endpoint (days 33–38) is a *read* or a
+*compute*, and there is no write path. Walking the non-goals against what shipped:
+
+- **No write operations.** The full surface is `GET` reads (`sessions`, `{id}`, `timeline`,
+  `state`, `source`, `calltree`, `calltree/children`, `value`, `step`, `diff`, `queries`),
+  `POST /query` (computes a page of instants, mutates nothing), and `WS /stream` (observes a
+  growing file). The recording is opened read-only. Immutability held. ✓
+- **The retroactive breakpoint stayed a *query*, not a gutter breakpoint.** Clicking a line runs
+  `POST /query {name:"break"}`; no endpoint installs a live breakpoint, because there is nothing
+  live to break — exactly non-goal #2. ✓
+- **`/diff` is *within-session*, not multi-session.** Day 37's `GET /diff?seq=` reports one
+  instant's variable changes from the day-16 deltas. It is not the "compare two runs" feature
+  that non-goal #3 defers — the name is the only thing that could be misread, and it is worth
+  saying so here. ✓
+- **`/api/queries` describes queries; it is not a config/plugin API** (non-goal #7). It enumerates
+  what the engine already offers so a form can be built from it — no extension point, no
+  configurability beyond a query's own arguments. ✓
+- No account/persistence/sharing, no code editing, no editor extension — none shipped. ✓
+
+Two honest notes, neither a drift:
+- The endpoint table in **ADR-0010 predated `/diff`, `/calltree/children` and `/api/queries`**;
+  those were added within scope and the table is reconciled in the same checkpoint. The
+  authoritative contract is `/openapi.json` (ADR-0010 decision 7), which cannot drift.
+- The "clicking a line does not install a live breakpoint" guarantee is the **frontend's** to keep
+  as well; it is called out in `docs/frontend-integration.md` and is a frontend-review checklist
+  item, not something the backend can enforce (the backend simply offers no such endpoint).
+
+The pressure ADR-0011 was written to resist — "just one more panel" pulling requirements up the
+stack — did not materialise on the backend: the five panels shipped over the day-32 API and the
+dependency arrow (`test_no_layer_imports_a_higher_layer`, `test_no_storage_type_can_reach_the_wire`)
+is still green. **Scope held.**

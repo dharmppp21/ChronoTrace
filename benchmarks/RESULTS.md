@@ -913,6 +913,63 @@ The evaluator is not `eval`: conditions are parsed, whitelisted, and walked over
 That is a correctness/security property, not a speed one, but it is the one that lets a
 condition arrive over an HTTP request on day 34 without becoming an RCE.
 
+## Day 39 — Checkpoint 5 (M5): the browser tier, measured
+
+Same machine as every earlier checkpoint (i5-13450HX, Windows 11, Python 3.14). Phase 5 (days
+33–38) added the server, live streaming, and the five panels' backends. **None of it touches the
+reconstruct / store / index hot loops** — it is a read layer over them — so the Checkpoint-3
+engine numbers stand, and the new surface to measure is the API.
+
+### The `/state` hot path, against ADR-0010's budget
+
+`/state?seq=` is the drag endpoint: `reconstruct(seq)` + resolve previews + `to_wire`. The
+reconstruction underneath is byte-identical to Checkpoint 3.
+
+| | Checkpoint 3 (day 24) | **Checkpoint 5 (day 39)** | budget |
+|---|---:|---:|---|
+| replay depth, max | 996 | **996** | ≤ 1,000 — **HOLDS** |
+| cached +1 step (a drag), p95 | — | **155 µs** | the scrub hot path |
+| cold random reconstruct, p95 | — | **44.9 ms** | < 50 ms (`/state`) |
+| `/state` p95 (server, small recording) | — | **< 50 ms** | ADR-0010 — asserted in CI |
+
+`test_state_p95_is_within_budget` asserts the end-to-end `/state` p95 < 50 ms on every push;
+`bench_reconstruct.py` supplies the at-scale reconstruction number above. Cold-jump p50 is
+run-to-run bimodal (a cold block decode can trip a gen-2 GC pause — days 13, 20), so the p95 is
+the honest figure; it sits inside the budget. **No regression against Checkpoints 1–4:** the new
+code adds endpoints, a delta *lookup*, and two call-tree columns, none on a hot path.
+
+### The new panel endpoints — complexity, not micro-benchmarked (all indexed lookups)
+
+| endpoint | day | work | complexity |
+|---|---|---|---|
+| `GET /diff?seq=` | 37 | the day-16 BIND deltas *at* one seq | O(changes) — a lookup, not a state compare |
+| `GET /calltree/children?parent=` | 38 | one page of a frame's children | O(log n + page) via `ix_frames_parent` |
+| `GET /api/queries` | 38 | introspect each query's dataclass fields | O(queries), static per process |
+
+These are index seeks plus bounded per-page work, the same shape as the day-28 query latencies;
+none reconstructs, so none is on the `/state` budget. The immutable ETag cache makes a re-hit of
+any of them a 304 with zero recompute.
+
+### Suite
+
+| | Checkpoint 3 | Checkpoint 4 (Phase 4) | **Checkpoint 5** |
+|---|---:|---:|---:|
+| backend tests | 400 | ~520 | **634** |
+| CI cells green | 9/9 | 9/9 | **9/9** |
+| import-graph / no-storage-leak | green | green | **green** |
+
+### Frontend performance — the browser-side numbers (owner: the Antigravity UI)
+
+Measured in the browser profiler, not here. Recorded when the UI lands:
+
+| target | budget | measured |
+|---|---|---|
+| timeline drag on a 1M-event recording | 60 fps | _pending (browser profiler)_ |
+| production bundle size | < ~1 MB for a local tool | _pending_ |
+
+The backend guarantees the drag *can* be 60 fps — `/state` is preview-only, cancellable, and
+immutable-cached — but the frame budget is the frontend's to measure and defend.
+
 ## Standing budgets
 
 | thing | budget | current | measured |

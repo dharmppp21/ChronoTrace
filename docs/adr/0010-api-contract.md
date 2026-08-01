@@ -36,11 +36,18 @@ latency budget (a design without budgets is not done).
 | `GET .../timeline?buckets=N` | scrubber background | day-27 density | 30 ms | `ETag`, immutable |
 | `GET .../state?seq=` | **the scrubber (hot)** | `reconstruct(seq)` + resolve | **< 50 ms p95** | `ETag`, immutable |
 | `GET .../source?file=` | source + heatmap | read file + `heatmap` | 40 ms | `ETag`, immutable |
-| `GET .../calltree?seq=` | call tree | `live_at` / `children_of` | 30 ms | `ETag`, immutable |
+| `GET .../calltree?seq=` | call tree (stack) | `stack_at` | 30 ms | `ETag`, immutable |
+| `GET .../calltree/children?parent=` | call tree (lazy) | `child_frames` (day 38) | 30 ms | `ETag`, immutable |
+| `GET .../diff?seq=` | variables (day 37) | day-16 deltas at `seq` | 30 ms | `ETag`, immutable |
 | `POST .../query` | query box | day-28 registry | per query's contract | `no-store` (has a body) |
+| `GET /api/queries` | query form (day 38) | registry descriptors | 20 ms | (static per build) |
 | `GET .../step?seq=&dir=&mode=` | step buttons | day-21 stepping | < 20 ms | `ETag`, immutable |
 | `GET .../value?ref=` | expand a variable | resolve one ref, one level | 20 ms | `ETag`, immutable |
 | `WS .../stream` | live tail (day 34) | monitoring feed | — | n/a |
+
+*Reconciled at Checkpoint 5 (day 39): `/diff`, `/calltree/children` and `/api/queries` were added
+within scope after this ADR was written (days 37–38); all are reads or descriptors. The generated
+`/openapi.json` (decision 7) is the authoritative, drift-proof list — this table is illustrative.*
 
 ## Decision 3 — `/state` is designed for a drag
 
@@ -84,6 +91,7 @@ them is that the user does something different about each*:
 | `truncated_seq` | 404 | this instant was lost to a crash; the recording ends earlier |
 | `not_found` | 404 | no such session or file |
 | `unknown_query` | 400 | typo in the query name |
+| `bad_request` | 400 | malformed request or query args — incl. a bad `--if` condition (day 38), whose `detail` carries the parser's column / the rule a forbidden construct broke |
 
 The mapping is `dto.STATUS_FOR`, tested exhaustive, so a new code cannot ship without a status.
 `not_indexed` is consistent with ADR-0008's lazy fallback: the server may build the index on
