@@ -2,13 +2,20 @@
 
 **A time-travel debugger for Python.** Record your program once, then scrub backward through its execution to find the bug.
 
-> **Status: the engine is done** (`v0.3.0-timetravel`, day 24 of 50). Recording,
-> the durable `.chrono` store, and reconstruction with backward stepping all work
-> today, from a terminal REPL. Queries are Phase 4; the web UI is Phase 5. This
-> README describes what runs today and is honest about what does not.
+<!-- HERO GIF (clip #8): the browser UI scrubbing BACKWARD from a wrong total to the aliased dict.
+     When recorded, replace this comment with the image:
+     <p align="center"><img src="docs/media/hero-scrub.gif" alt="Scrubbing backward through a recording to find an aliased dict" width="800"></p> -->
 
-<!-- DEMO GIF: clip #4 — stepping backward from a wrong total to the aliased dict.
-     Recorded from the transcript under "Finding a real bug, backwards" below. -->
+> ▶ **The demo, in one motion:** run a pipeline that prints three identical regional totals — no
+> traceback, every `+=` looks right. Drag the timeline **backward** and watch `total` *un-change*
+> until, 815 events before the symptom, the three regions are already the **same dict**. A bug
+> found by travelling through time, not by re-running. *(Clip #8, recorded from the UI below.)*
+
+> **Status:** the **engine is done** (`v0.4.0-query`) and the **browser tier (Phase 5) is landing** —
+> a timeline scrubber, source + execution heatmap, variables that change *backward*, a full call
+> tree, and a registry-driven query panel, all over a small local API. Recording, the durable
+> `.chrono` store, reconstruction with backward stepping, and the causal query engine all work
+> today. This README is honest about what runs and what is still being recorded for the demo.
 
 ## Why
 
@@ -217,6 +224,21 @@ UI origin — a recording is your program's memory, and localhost is not a secur
 boundary against a malicious web page. See [`docs/api.md`](docs/api.md) and
 [ADR-0010](docs/adr/0010-api-contract.md) for the contract, caching model, and threat model.
 
+### The five panels
+
+The whole UI is a **pure function of one event index** — move the playhead and every panel
+re-renders the same instant together. It is a *scrubber, not an IDE*: read-only, one recording,
+localhost (ADR-0011). Full guide, with keyboard shortcuts, in [`docs/ui.md`](docs/ui.md).
+
+<!-- PANEL SCREENSHOTS: add each as docs/media/panel-*.png and uncomment.
+     <p align="center"><img src="docs/media/panel-timeline.png" alt="Timeline scrubber" width="800"></p> -->
+
+- **Timeline** — the recording as a density band; drag to travel (rAF-coalesced, cancellable).
+- **Source + heatmap** — the executing file, log-scaled per-line execution counts; click the gutter for a **retroactive breakpoint**.
+- **Variables** — locals as previews, lazily expandable; scrub backward and watch them change backward, with `old → new` diffs from the invertible deltas.
+- **Call tree** — not just the current stack but *every call the program ever made*, coloured by how each ended (returned / **raised** / open); click one that returned 200k events ago and go there.
+- **Query** — forms generated from the engine's query registry; results are hoverable, jump-to-instant links.
+
 ## Overhead, measured not boasted
 
 i5-13450HX, Windows 11, Python 3.14, medians of 5. Full tables and methodology in
@@ -285,9 +307,9 @@ the interval tradeoff is
 |---|---|---|
 | Recording (lines, calls, values, exceptions) | 1 | **done** |
 | `.chrono` format (framed, zstd, columnar, keyframe+delta, crash-recoverable) | 2 | **done** |
-| Backward stepping / scrubbing | 3 | planned |
-| Causal queries ("who last wrote to `total`?") | 4 | planned |
-| Timeline UI | 5 | planned |
+| Backward stepping / scrubbing | 3 | **done** |
+| Causal queries ("who last wrote to `total`?") | 4 | **done** (`v0.4.0-query`) |
+| Browser timeline UI (five panels over a local API) | 5 | **shipping** — engine + API done; UI landing |
 
 ## Requirements
 
