@@ -4,7 +4,7 @@ Problem this solves: the UI needs two structural questions answered instantly â€
 frames were live at `seq`?* (the call-stack panel, on every scrub) and *what did frame F
 call?* (expanding a node in the tree).
 
-Interface: `CallTreeIndexer`, plus `live_at`, `children_of`, `descendants_of`.
+Interface: `CallTreeIndexer`, plus `live_at`, `stack_at`, `child_frames`, `descendants_of`.
 
 It must never know: how a tree is drawn, or what the user clicked.
 
@@ -226,22 +226,6 @@ def child_frames(
             f"SELECT {_FRAME_COLS} FROM frames "  # noqa: S608 -- _FRAME_COLS is a constant
             "WHERE parent_frame_id IS ? AND entry_seq > ? ORDER BY entry_seq LIMIT ?",
             (parent_frame_id, after, limit),
-        )
-    ]
-
-
-def children_of(connection: sqlite3.Connection, frame_id: int) -> list[tuple[int, int, int]]:
-    """The direct children of `frame_id`, in call order. One level of the tree.
-
-    Complexity: O(log n + children) via `ix_frames_parent`. The UI expands one level at a
-    time, so this is the query it actually makes -- `descendants_of` is for search.
-    """
-    return [
-        (int(f), int(c), int(e))
-        for f, c, e in connection.execute(
-            "SELECT frame_id, code_id, entry_seq FROM frames "
-            "WHERE parent_frame_id = ? ORDER BY entry_seq",
-            (frame_id,),
         )
     ]
 

@@ -9,7 +9,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-from chronotrace.index import children_of, descendants_of, live_at
+from chronotrace.index import child_frames, descendants_of, live_at
 from chronotrace.recorder.events import EventKind
 
 from .conftest import Indexed, index_example
@@ -167,7 +167,9 @@ def test_intervals_stop_encoding_ancestry_once_frames_suspend(tmp_path: Path) ->
 def test_children_are_returned_in_call_order(simple: Indexed) -> None:
     """The tree panel renders them top to bottom in the order they were called."""
     for (frame_id,) in simple.db.execute("SELECT frame_id FROM frames"):
-        entries = [entry for _f, _c, entry in children_of(simple.db, frame_id)]
+        # -1/large limit = all direct children in one page; child_frames returns the rich row
+        rows = child_frames(simple.db, frame_id, -1, 10_000)
+        entries = [entry for _f, _c, entry, _p, _es, _ek in rows]
         assert entries == sorted(entries)
 
 
