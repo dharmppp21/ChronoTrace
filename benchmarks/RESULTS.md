@@ -1017,6 +1017,32 @@ dispatch ~5%) are un-banked and need no native dependency, and Rust would break 
 zero-runtime-dep-in-the-user's-process invariant. Re-profile after the Python wins; see
 [ADR-0013](../docs/adr/0013-performance-plan.md).
 
+## Day 41 — the first optimisations (`OPTIMIZATIONS.md`)
+
+Worked top-down from the day-40 profile, one bottleneck at a time, each measured controlled
+back-to-back (`git stash` the change, measure both), referee green after every step.
+
+| # | change | measured (controlled) | verdict |
+|---|---|---|---|
+| 1 | fast-path leaf atoms in `capture()` | capture −11% to −16% (int 518→453, dict 3359→2989 ns) | **kept** |
+| 2 | content digest (`repr`+blake2b) | no safe Python win (blake2b optimal; id-dedup = the day-8 trap) | deferred |
+| 3 | compile redaction globs to one regex | `should_redact` 1866→419 ns/name (**−78%, 4.5×**) | **kept** |
+| 4 | `frozenset` vs the `is`-chain atom check | a wash (int 400 vs 416; within noise) | **reverted** |
+
+**Why no updated overhead-× headline.** The component wins are clean and trustworthy (isolated
+micro, controlled back-to-back). The *end-to-end* overhead ratio is not: on a loaded laptop it
+divides the instrumented time by a sub-millisecond baseline and swings on noise (the day-24
+warning, restated) — a quick post-optimisation pass read json ≈ 2000× and tight-loop ≈ 1700×,
+higher than the controlled day-24 figures purely from machine load, which would *misreport* an
+improvement as a regression. So the honest report is the component numbers, not a re-quoted ×; a
+clean end-to-end re-measure on a quiet machine is the way to refresh the headline, deferred rather
+than faked. The **perf regression guard** (`tests/perf/`) pins the component budgets in CI instead.
+
+**Stopping point.** Two clean wins, one honest deferral (digest → the ADR-0013 fused-capture-hash
+change), one honest revert, a thresholded regression guard. The remaining bottlenecks are a large
+risky change (digest) or sub-5% grinds (identity, dispatch — dispatch is already day-7's measured
+optimum). Stopped there, per the rule set in advance. See `OPTIMIZATIONS.md`.
+
 ## Standing budgets
 
 | thing | budget | current | measured |

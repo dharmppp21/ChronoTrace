@@ -255,8 +255,12 @@ workload; scope filtering via `DISABLE` cuts realistic control-flow overhead
 **33×**. For honest comparison, `pdb` is widely cited at 50–100×.
 
 \* Value capture is correct and bounded but not yet fast — it re-serialises each
-changed value; the per-value cost (~827 µs for a large value) is Phase 6's
-optimisation target (day 40), measured and isolated, not hand-waved.
+changed value. Phase 6 profiled it (day 40, `benchmarks/PROFILE.md`) and landed the
+first wins (day 41, `benchmarks/OPTIMIZATIONS.md`): a leaf-atom fast path in the capturer
+(−11–16%) and a compiled-regex redactor (−78% on the per-local secret-name check). The
+largest remaining lever — a fused capture+hash pass — was **deferred by Amdahl's law**, not
+hand-waved: a native rewrite caps at ~3.7× and isn't worth breaking the recorder's
+zero-dependency guarantee for yet ([ADR-0013](docs/adr/0013-performance-plan.md)).
 
 ## How it works
 
