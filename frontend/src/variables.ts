@@ -63,27 +63,50 @@ function renderVariables(state: State) {
   const root = document.createElement('div');
   root.className = 'var-tree';
 
-  // Hide Python's auto-created module dunders (__builtins__, __file__, __spec__, ...) -- in a
-  // module-level frame they bury the real variables and are never what you are debugging.
-  const shown = frame.variables.filter(v => !/^__.*__$/.test(v.name));
-  const hidden = frame.variables.length - shown.length;
+  // Split out Python's auto-created module dunders (__builtins__, __file__, __spec__, ...): in a
+  // module frame they bury the real variables, so they go in a collapsed "special variables" group.
+  const isDunder = (v: Variable) => /^__.*__$/.test(v.name);
+  const shown = frame.variables.filter(v => !isDunder(v));
+  const special = frame.variables.filter(isDunder);
 
-  if (shown.length === 0 && hidden === 0) {
+  if (shown.length === 0 && special.length === 0) {
     root.innerHTML = '<div class="var-empty">No local variables</div>';
   } else {
-    for (const v of shown) {
-      root.appendChild(createVarNode(v, frame.frame_id));
-    }
-    if (hidden > 0) {
-      const note = document.createElement('div');
-      note.className = 'var-hidden-note';
-      note.textContent = `${hidden} module internal${hidden === 1 ? '' : 's'} hidden`;
-      root.appendChild(note);
-    }
+    for (const v of shown) root.appendChild(createVarNode(v, frame.frame_id));
+    if (special.length > 0) root.appendChild(specialGroup(special, frame.frame_id));
   }
 
   container.innerHTML = '';
   container.appendChild(root);
+}
+
+function specialGroup(specials: Variable[], frameId: number): HTMLElement {
+  // A collapsible "N special variables" group for the module dunders. Rendered lazily -- the rows
+  // are built only on first expand, so the common (collapsed) case costs nothing.
+  const wrapper = document.createElement('div');
+  const header = document.createElement('div');
+  header.className = 'var-special-header';
+  const body = document.createElement('div');
+  body.style.display = 'none';
+
+  let expanded = false;
+  let built = false;
+  const label = () =>
+    `${expanded ? '▾' : '▸'} ${specials.length} special variable${specials.length === 1 ? '' : 's'}`;
+  header.textContent = label();
+
+  header.addEventListener('click', () => {
+    expanded = !expanded;
+    header.textContent = label();
+    body.style.display = expanded ? 'block' : 'none';
+    if (expanded && !built) {
+      built = true;
+      for (const v of specials) body.appendChild(createVarNode(v, frameId));
+    }
+  });
+
+  wrapper.append(header, body);
+  return wrapper;
 }
 
 function createVarNode(v: Variable | ValueChild, frameId: number, indent: number = 0): HTMLElement {

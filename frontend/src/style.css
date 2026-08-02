@@ -229,12 +229,16 @@ main#panels {
   align-items: center;
 }
 
-.var-hidden-note {
+.var-special-header {
   color: var(--text-muted);
-  font-size: 0.75rem;
-  font-style: italic;
-  padding: 8px 4px 2px;
-  opacity: 0.65;
+  font-family: var(--code-font);
+  font-size: 0.8rem;
+  padding: 6px 4px 2px;
+  cursor: pointer;
+  user-select: none;
+}
+.var-special-header:hover {
+  color: var(--text-main);
 }
 
 .var-empty {
