@@ -254,6 +254,14 @@ Content-addressed deduplication cuts recording size by **97.9%** on the realisti
 workload; scope filtering via `DISABLE` cuts realistic control-flow overhead
 **33×**. For honest comparison, `pdb` is widely cited at 50–100×.
 
+**Reading these numbers.** Control-flow-only recording — the default — is **6.7×** on realistic
+code, in `pdb`'s tracing range. **Value capture** (every variable's value at every line) is the
+opt-in deep-inspection mode, and it is what costs the four figures; reach for it when you need to
+*see* state, not just flow, and use `--sample` (planned) for hot loops. A native (Rust) rewrite of
+the capturer was profiled and **deliberately declined** — Amdahl caps the win at ~3.6× for a week
+of work plus a permanent build matrix, and changing the asymptotics with sampling beats it; the
+arithmetic is in [ADR-0014](docs/adr/0014-no-native-extension.md).
+
 \* Value capture is correct and bounded but not yet fast — it re-serialises each
 changed value. Phase 6 profiled it (day 40, `benchmarks/PROFILE.md`) and landed the
 first wins (day 41, `benchmarks/OPTIMIZATIONS.md`): a leaf-atom fast path in the capturer
