@@ -184,20 +184,62 @@ main#panels {
 .var-row {
   display: flex;
   align-items: center;
-  padding: 2px 0;
+  gap: 6px;
+  padding: 3px 4px;
+  border-radius: 4px;
   cursor: pointer;
 }
 .var-row:hover {
-  background-color: rgba(255, 255, 255, 0.05);
+  background-color: rgba(255, 255, 255, 0.06);
+}
+
+.expander {
+  flex-shrink: 0;
+  width: 12px;
+  color: var(--text-muted);
+  cursor: pointer;
+  user-select: none;
 }
 
 .var-name {
   color: #c4b5fd;
-  margin-right: 8px;
+  font-weight: 500;
+  flex-shrink: 0;
 }
 
+.var-eq {
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+/* the value stays on one line and ellipsizes; the full preview is on the row's title (hover) */
 .var-preview {
   color: #a7f3d0;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.var-badges {
+  flex-shrink: 0;
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+
+.var-hidden-note {
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  font-style: italic;
+  padding: 8px 4px 2px;
+  opacity: 0.65;
+}
+
+.var-empty {
+  color: var(--text-muted);
+  font-style: italic;
 }
 
 .badge {
@@ -207,7 +249,6 @@ main#panels {
   font-size: 0.7rem;
   font-family: var(--ui-font);
   font-weight: 600;
-  margin-left: 8px;
   background-color: var(--border-color);
 }
 

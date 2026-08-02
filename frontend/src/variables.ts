@@ -60,16 +60,25 @@ function renderVariables(state: State) {
     container.innerHTML = '<div style="color:var(--text-muted)">No active frames</div>';
     return;
   }
-  const locals = frame.variables;
-  
   const root = document.createElement('div');
   root.className = 'var-tree';
 
-  if (locals.length === 0) {
-    root.innerHTML = '<div style="color:var(--text-muted);font-style:italic">No local variables</div>';
+  // Hide Python's auto-created module dunders (__builtins__, __file__, __spec__, ...) -- in a
+  // module-level frame they bury the real variables and are never what you are debugging.
+  const shown = frame.variables.filter(v => !/^__.*__$/.test(v.name));
+  const hidden = frame.variables.length - shown.length;
+
+  if (shown.length === 0 && hidden === 0) {
+    root.innerHTML = '<div class="var-empty">No local variables</div>';
   } else {
-    for (const v of locals) {
+    for (const v of shown) {
       root.appendChild(createVarNode(v, frame.frame_id));
+    }
+    if (hidden > 0) {
+      const note = document.createElement('div');
+      note.className = 'var-hidden-note';
+      note.textContent = `${hidden} module internal${hidden === 1 ? '' : 's'} hidden`;
+      root.appendChild(note);
     }
   }
 
@@ -111,14 +120,16 @@ function createVarNode(v: Variable | ValueChild, frameId: number, indent: number
     customBadges += `<span class="badge" style="background:#3b82f6;color:#f8fafc" title="Object Identity">#${v.obj_id}</span>`;
   }
 
-  const caret = v.has_children ? '&#9656; ' : '&nbsp;&nbsp;';
+  const caret = v.has_children ? '&#9656;' : '';
+  const shownPreview = escapeHtml(preview);
 
+  // name = value  (value truncates to one line with an ellipsis; hover shows the full preview)
   row.innerHTML = `
-    <span style="color:var(--text-muted);width:16px;display:inline-block;cursor:pointer;" class="expander">${caret}</span>
+    <span class="expander">${caret}</span>
     <span class="var-name">${escapeHtml(keyName)}</span>
-    <span class="var-preview">${escapeHtml(preview)}</span>
-    ${badgeHtml}
-    ${customBadges}
+    <span class="var-eq">=</span>
+    <span class="var-preview" title="${shownPreview}">${shownPreview}</span>
+    <span class="var-badges">${badgeHtml}${customBadges}</span>
   `;
 
   // Context menu (right-click) for query
