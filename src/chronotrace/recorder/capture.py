@@ -143,7 +143,18 @@ def _capture(obj: object, depth: int, walk: _Walk) -> CapturedValue:
         return {"$": "budget"}
     walk.budget -= 1
 
-    handler = _handler_for(type(obj))
+    # Fast path for leaf atoms -- the overwhelming majority of captured *nodes* (every value
+    # inside every container). Each otherwise pays a `_handler_for` dict probe plus a call to
+    # `_atom`/`_string` that only returns the value. Exact-type `is` checks (never isinstance)
+    # return it directly; a subclass misses and falls through to the registry, so the output is
+    # byte-for-byte what the handlers produced -- the referee proves it.
+    t = type(obj)
+    if t is int or t is bool or t is float or t is complex or obj is None:
+        return obj
+    if t is str and len(obj) <= walk.policy.max_str_len:  # type: ignore[arg-type]  # is str
+        return obj
+
+    handler = _handler_for(t)
     return handler(obj, depth, walk)
 
 
