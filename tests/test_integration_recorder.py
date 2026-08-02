@@ -74,6 +74,16 @@ def test_example_frames_are_balanced(name: str) -> None:
     assert_every_frame_dies_once(events)
 
 
+def test_record_out_creates_missing_parent_dirs(tmp_path: Path) -> None:
+    """`record --out new/dir/rec.chrono` creates the directory rather than FileNotFoundError-ing --
+    the parent does not exist on a fresh checkout (this bit the CI e2e fixture step)."""
+    from chronotrace.cli import main
+
+    out = tmp_path / "does" / "not" / "exist" / "rec.chrono"
+    assert main(["record", "--out", str(out), str(_EXAMPLES / "simple.py")]) == 0
+    assert out.is_file()
+
+
 def test_redaction_fires_in_the_full_pipeline() -> None:
     """A secret-named local is redacted end to end, not just in the unit test."""
 

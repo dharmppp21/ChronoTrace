@@ -570,6 +570,7 @@ def record_command(args: argparse.Namespace) -> int:
         },
     )
     out = (Path(args.out) if args.out else Path(args.script).with_suffix(".chrono")).resolve()
+    out.parent.mkdir(parents=True, exist_ok=True)  # `--out new/dir/rec.chrono` just works
     if args.ui:
         return record_ui(args, config, out)
     sink = MemorySink()
