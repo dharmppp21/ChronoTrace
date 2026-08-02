@@ -970,6 +970,53 @@ Measured in the browser profiler, not here. Recorded when the UI lands:
 The backend guarantees the drag *can* be 60 fps — `/state` is preview-only, cancellable, and
 immutable-cached — but the frame budget is the frontend's to measure and defend.
 
+## Day 40 — profiling the recorder (`profile_recorder.py`, full analysis in `PROFILE.md`)
+
+**A measurement day: zero optimisations shipped.** Three tools — py-spy (sampling, primary; four
+flamegraphs in `flamegraphs/`), cProfile, `perf_counter_ns` micro-timers. The point was to decide
+the Rust question with data, not preference.
+
+### Where the recorder's time goes (value capture ON)
+
+Value capture is ~99% of the *marginal* cost of turning capture on (flow-only 5.4×, capture ~2100×).
+Self-time within a realistic recording (`json_pipeline`, py-spy):
+
+| bottleneck | self-time | note |
+|---|---:|---|
+| value capture traversal | **~55%** | spread across `_mapping`/`_capture`/`_tagged`/`_string`/`_handler_for`/… |
+| content digest (`repr` + blake2b) | **25%** | the single hottest *leaf*; a ~600 ns fixed tax per capture |
+| `ObjectIdentity.of` | **7%** (13% incl.) | weakref bookkeeping per object |
+| allocation (`__new__`) | 6% | the captured-value dicts |
+| redaction + scope (`fnmatch`) | ~2% | cheap here |
+
+**On `tight_loop` (cheap scalars) the profile inverts:** the per-local **redaction `fnmatch` is
+~30%** — the fixed secret-name check dominates when values are cheap. Two workloads, wildly
+different profiles; the realistic one governs the plan.
+
+### Prediction vs reality (the honest gap)
+
+Predicted capture #1 / digest a small tail / redaction negligible. Reality: digest is the hottest
+single function and dominates cheap values (58% of an `int` capture); **redaction `fnmatch` is ~30%
+of `tight_loop`** (badly mispredicted); `ObjectIdentity` is 7-13% (underweighted). Confirmed:
+store/DISABLE ~0, capture dominates value-heavy workloads.
+
+### Pathologies + tool notes
+
+GC healthy: **gen-2 collections = 0** (the day-8 pause worry did not reproduce), gen-1 ~27, memory
+linear (276 B/event tight, 3099 B/event json). `DISABLE` still fires (no 30-day regression).
+`cProfile` is **blind** to the `sys.monitoring` callbacks (they bypass `sys.setprofile`) — a
+concrete reason py-spy is primary. `io_bound` drew 45 samples vs json's 2618, confirming
+instrumentation tracks lines executed, not wall time.
+
+### The Rust verdict (Amdahl)
+
+~88% of value-capture overhead is Python a native pass could replace → Amdahl caps a Rust rewrite at
+~8× (infinite) / ~3.7× (realistic 6×). **Deferred**, because flow-only already meets the 20× budget,
+the cheap Python wins (redaction regex ~30%, structural digest ~25%, lazy identity ~10%, dict
+dispatch ~5%) are un-banked and need no native dependency, and Rust would break the recorder's
+zero-runtime-dep-in-the-user's-process invariant. Re-profile after the Python wins; see
+[ADR-0013](../docs/adr/0013-performance-plan.md).
+
 ## Standing budgets
 
 | thing | budget | current | measured |
