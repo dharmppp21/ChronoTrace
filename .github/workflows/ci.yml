@@ -69,7 +69,24 @@ jobs:
         run: pytest tests/property --hypothesis-profile=ci -q
 
       - name: Tests
-        run: pytest
+        run: pytest -m "not perf"  # perf guards run on one consistent runner (the `perf` job)
+
+  # Performance regression guards (day 41). Timing-sensitive, so run on ONE consistent runner
+  # rather than the OS/Python matrix, where bursty macOS/Windows timing would flake a threshold.
+  # A single Linux box, tolerances chosen with a ~10x margin over the dev number (see the test).
+  perf:
+    name: perf
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+          cache: pip
+      - name: Install
+        run: pip install -e ".[dev]"
+      - name: Perf regression guards
+        run: pytest -m perf -q
 
   # The frontend (Phase 5, day 35) is built in Antigravity and lands in `frontend/`. These
   # steps are guarded on that directory existing, so this job is green today (they skip) and

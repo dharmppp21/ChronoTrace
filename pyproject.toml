@@ -234,6 +234,12 @@ testpaths = ["tests"]
 # themselves live in tests/property/conftest.py, because Hypothesis registers them in
 # code -- this only chooses which one an unadorned `pytest` gets.
 addopts = "-q --strict-markers --strict-config --hypothesis-profile=dev"
+markers = [
+    # Timing-sensitive perf guards. Run on one consistent runner (the `perf` CI job), not the
+    # OS/Python matrix, where bursty macOS/Windows timing would flake them. A local unadorned
+    # `pytest` still runs them; CI's matrix step excludes them with `-m "not perf"`.
+    "perf: performance regression guard (thresholded timing)",
+]
 
 # ---------------------------------------------------------------------------
 # ChronoTrace's own recording config (documented; see docs/configuration.md)
