@@ -40,8 +40,9 @@ little) and is called out in the docs.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
-from fnmatch import fnmatchcase
+import re
+from collections.abc import Callable, Iterable
+from fnmatch import translate
 
 DEFAULT_PATTERNS: tuple[str, ...] = (
     "*password*",
@@ -75,7 +76,7 @@ class Redactor:
     even though it runs on every local.
     """
 
-    __slots__ = ("_patterns",)
+    __slots__ = ("_match",)
 
     def __init__(self, patterns: Iterable[str] = DEFAULT_PATTERNS) -> None:
         """Build a redactor.
@@ -83,8 +84,16 @@ class Redactor:
         Args:
             patterns: fnmatch globs matched case-insensitively against local
                 names. Lower-cased once here so matching does not re-fold per call.
+
+        The globs are compiled to a **single** regex (`fnmatch.translate` joined by
+        `|`), so `should_redact` is one C-level match, not one `fnmatchcase` call per
+        pattern -- day-40 measured the per-pattern loop at ~30% of a cheap-value
+        recording, not the "negligible" the old docstring assumed. `translate` keeps
+        exact fnmatch semantics, so a custom pattern with `?`/`[...]` still works; an
+        empty pattern set compiles to `(?!)`, which never matches (redact nothing).
         """
-        self._patterns = tuple(p.lower() for p in patterns)
+        alternation = "|".join(translate(p.lower()) for p in patterns)
+        self._match: Callable[[str], re.Match[str] | None] = re.compile(alternation or "(?!)").match
 
     def should_redact(self, name: str) -> bool:
         """Whether a local called `name` must be redacted (its value never read).
@@ -95,8 +104,6 @@ class Redactor:
         Returns:
             True if any pattern matches, case-insensitively.
 
-        Complexity: O(patterns), a handful of fnmatch calls on a short string.
-        Runs once per local per line; measured negligible against capture cost.
+        Complexity: one regex match on a short string. Runs once per local per line.
         """
-        low = name.lower()
-        return any(fnmatchcase(low, p) for p in self._patterns)
+        return self._match(name.lower()) is not None
