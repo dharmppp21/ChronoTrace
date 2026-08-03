@@ -1,5 +1,11 @@
 """Measure the cost of observing every line of a Python program.
 
+HISTORICAL (day 2 spike). This measures a *floor* -- a callback that counts or appends
+a tuple, plus the throwaway `spike_capture`. The current, canonical overhead numbers use
+the real recorder against real baselines (pdb, coverage.py) in `benchmarks/bench_overhead.py`
+(run via `python -m benchmarks`). This file is kept because `RESULTS-overhead.md` cites it;
+it is not the number to quote.
+
 The question this spike exists to answer: can we watch every line of a program at
 a price a developer will actually pay? Everything in ChronoTrace rests on the
 answer, so the methodology matters more than the code.
