@@ -1,0 +1,491 @@
+<?xml version="1.0" standalone="no"?><!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd"><svg version="1.1" width="1200" height="346" onload="init(evt)" viewBox="0 0 1200 346" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:fg="http://github.com/jonhoo/inferno"><!--Flame graph stack visualization. See https://github.com/brendangregg/FlameGraph for latest version, and http://www.brendangregg.com/flamegraphs.html for examples.--><!--NOTES: --><defs><linearGradient id="background" y1="0" y2="1" x1="0" x2="0"><stop stop-color="#eeeeee" offset="5%"/><stop stop-color="#eeeeb0" offset="95%"/></linearGradient></defs><style type="text/css">
+text { font-family:monospace; font-size:12px }
+#title { text-anchor:middle; font-size:17px; }
+#matched { text-anchor:end; }
+#search { text-anchor:end; opacity:0.1; cursor:pointer; }
+#search:hover, #search.show { opacity:1; }
+#subtitle { text-anchor:middle; font-color:rgb(160,160,160); }
+#unzoom { cursor:pointer; }
+#frames > *:hover { stroke:black; stroke-width:0.5; cursor:pointer; }
+.hide { display:none; }
+.parent { opacity:0.5; }
+</style><script type="text/ecmascript"><![CDATA[
+        var nametype = 'Function:';
+        var fontsize = 12;
+        var fontwidth = 0.59;
+        var xpad = 10;
+        var inverted = true;
+        var searchcolor = 'rgb(230,0,230)';
+        var fluiddrawing = true;
+        var truncate_text_right = false;
+    ]]><![CDATA["use strict";
+var details, searchbtn, unzoombtn, matchedtxt, svg, searching, frames, known_font_width;
+function init(evt) {
+    details = document.getElementById("details").firstChild;
+    searchbtn = document.getElementById("search");
+    unzoombtn = document.getElementById("unzoom");
+    matchedtxt = document.getElementById("matched");
+    svg = document.getElementsByTagName("svg")[0];
+    frames = document.getElementById("frames");
+    known_font_width = get_monospace_width(frames);
+    total_samples = parseInt(frames.attributes.total_samples.value);
+    searching = 0;
+
+    // Use GET parameters to restore a flamegraph's state.
+    var restore_state = function() {
+        var params = get_params();
+        if (params.x && params.y)
+            zoom(find_group(document.querySelector('[*|x="' + params.x + '"][y="' + params.y + '"]')));
+        if (params.s)
+            search(params.s);
+    };
+
+    if (fluiddrawing) {
+        // Make width dynamic so the SVG fits its parent's width.
+        svg.removeAttribute("width");
+        // Edge requires us to have a viewBox that gets updated with size changes.
+        var isEdge = /Edge\/\d./i.test(navigator.userAgent);
+        if (!isEdge) {
+            svg.removeAttribute("viewBox");
+        }
+        var update_for_width_change = function() {
+            if (isEdge) {
+                svg.attributes.viewBox.value = "0 0 " + svg.width.baseVal.value + " " + svg.height.baseVal.value;
+            }
+
+            // Keep consistent padding on left and right of frames container.
+            frames.attributes.width.value = svg.width.baseVal.value - xpad * 2;
+
+            // Text truncation needs to be adjusted for the current width.
+            update_text_for_elements(frames.children);
+
+            // Keep search elements at a fixed distance from right edge.
+            var svgWidth = svg.width.baseVal.value;
+            searchbtn.attributes.x.value = svgWidth - xpad;
+            matchedtxt.attributes.x.value = svgWidth - xpad;
+        };
+        window.addEventListener('resize', function() {
+            update_for_width_change();
+        });
+        // This needs to be done asynchronously for Safari to work.
+        setTimeout(function() {
+            unzoom();
+            update_for_width_change();
+            restore_state();
+        }, 0);
+    } else {
+        restore_state();
+    }
+}
+// event listeners
+window.addEventListener("click", function(e) {
+    var target = find_group(e.target);
+    if (target) {
+        if (target.nodeName == "a") {
+            if (e.ctrlKey === false) return;
+            e.preventDefault();
+        }
+        if (target.classList.contains("parent")) unzoom();
+        zoom(target);
+
+        // set parameters for zoom state
+        var el = target.querySelector("rect");
+        if (el && el.attributes && el.attributes.y && el.attributes["fg:x"]) {
+            var params = get_params()
+            params.x = el.attributes["fg:x"].value;
+            params.y = el.attributes.y.value;
+            history.replaceState(null, null, parse_params(params));
+        }
+    }
+    else if (e.target.id == "unzoom") {
+        unzoom();
+
+        // remove zoom state
+        var params = get_params();
+        if (params.x) delete params.x;
+        if (params.y) delete params.y;
+        history.replaceState(null, null, parse_params(params));
+    }
+    else if (e.target.id == "search") search_prompt();
+}, false)
+// mouse-over for info
+// show
+window.addEventListener("mouseover", function(e) {
+    var target = find_group(e.target);
+    if (target) details.nodeValue = nametype + " " + g_to_text(target);
+}, false)
+// clear
+window.addEventListener("mouseout", function(e) {
+    var target = find_group(e.target);
+    if (target) details.nodeValue = ' ';
+}, false)
+// ctrl-F for search
+window.addEventListener("keydown",function (e) {
+    if (e.keyCode === 114 || (e.ctrlKey && e.keyCode === 70)) {
+        e.preventDefault();
+        search_prompt();
+    }
+}, false)
+// functions
+function get_params() {
+    var params = {};
+    var paramsarr = window.location.search.substr(1).split('&');
+    for (var i = 0; i < paramsarr.length; ++i) {
+        var tmp = paramsarr[i].split("=");
+        if (!tmp[0] || !tmp[1]) continue;
+        params[tmp[0]]  = decodeURIComponent(tmp[1]);
+    }
+    return params;
+}
+function parse_params(params) {
+    var uri = "?";
+    for (var key in params) {
+        uri += key + '=' + encodeURIComponent(params[key]) + '&';
+    }
+    if (uri.slice(-1) == "&")
+        uri = uri.substring(0, uri.length - 1);
+    if (uri == '?')
+        uri = window.location.href.split('?')[0];
+    return uri;
+}
+function find_child(node, selector) {
+    var children = node.querySelectorAll(selector);
+    if (children.length) return children[0];
+    return;
+}
+function find_group(node) {
+    var parent = node.parentElement;
+    if (!parent) return;
+    if (parent.id == "frames") return node;
+    return find_group(parent);
+}
+function orig_save(e, attr, val) {
+    if (e.attributes["fg:orig_" + attr] != undefined) return;
+    if (e.attributes[attr] == undefined) return;
+    if (val == undefined) val = e.attributes[attr].value;
+    e.setAttribute("fg:orig_" + attr, val);
+}
+function orig_load(e, attr) {
+    if (e.attributes["fg:orig_"+attr] == undefined) return;
+    e.attributes[attr].value = e.attributes["fg:orig_" + attr].value;
+    e.removeAttribute("fg:orig_" + attr);
+}
+function g_to_text(e) {
+    var text = find_child(e, "title").firstChild.nodeValue;
+    return (text)
+}
+function g_to_func(e) {
+    var func = g_to_text(e);
+    // if there's any manipulation we want to do to the function
+    // name before it's searched, do it here before returning.
+    return (func);
+}
+function get_monospace_width(frames) {
+    // Given the id="frames" element, return the width of text characters if
+    // this is a monospace font, otherwise return 0.
+    text = find_child(frames.children[0], "text");
+    originalContent = text.textContent;
+    text.textContent = "!";
+    bangWidth = text.getComputedTextLength();
+    text.textContent = "W";
+    wWidth = text.getComputedTextLength();
+    text.textContent = originalContent;
+    if (bangWidth === wWidth) {
+        return bangWidth;
+    } else {
+        return 0;
+    }
+}
+function update_text_for_elements(elements) {
+    // In order to render quickly in the browser, you want to do one pass of
+    // reading attributes, and one pass of mutating attributes. See
+    // https://web.dev/avoid-large-complex-layouts-and-layout-thrashing/ for details.
+
+    // Fall back to inefficient calculation, if we're variable-width font.
+    // TODO This should be optimized somehow too.
+    if (known_font_width === 0) {
+        for (var i = 0; i < elements.length; i++) {
+            update_text(elements[i]);
+        }
+        return;
+    }
+
+    var textElemNewAttributes = [];
+    for (var i = 0; i < elements.length; i++) {
+        var e = elements[i];
+        var r = find_child(e, "rect");
+        var t = find_child(e, "text");
+        var w = parseFloat(r.attributes.width.value) * frames.attributes.width.value / 100 - 3;
+        var txt = find_child(e, "title").textContent.replace(/\([^(]*\)$/,"");
+        var newX = format_percent((parseFloat(r.attributes.x.value) + (100 * 3 / frames.attributes.width.value)));
+
+        // Smaller than this size won't fit anything
+        if (w < 2 * known_font_width) {
+            textElemNewAttributes.push([newX, ""]);
+            continue;
+        }
+
+        // Fit in full text width
+        if (txt.length * known_font_width < w) {
+            textElemNewAttributes.push([newX, txt]);
+            continue;
+        }
+
+        var substringLength = Math.floor(w / known_font_width) - 2;
+        if (truncate_text_right) {
+            // Truncate the right side of the text.
+            textElemNewAttributes.push([newX, txt.substring(0, substringLength) + ".."]);
+            continue;
+        } else {
+            // Truncate the left side of the text.
+            textElemNewAttributes.push([newX, ".." + txt.substring(txt.length - substringLength, txt.length)]);
+            continue;
+        }
+    }
+
+    console.assert(textElemNewAttributes.length === elements.length, "Resize failed, please file a bug at https://github.com/jonhoo/inferno/");
+
+    // Now that we know new textContent, set it all in one go so we don't refresh a bazillion times.
+    for (var i = 0; i < elements.length; i++) {
+        var e = elements[i];
+        var values = textElemNewAttributes[i];
+        var t = find_child(e, "text");
+        t.attributes.x.value = values[0];
+        t.textContent = values[1];
+    }
+}
+
+function update_text(e) {
+    var r = find_child(e, "rect");
+    var t = find_child(e, "text");
+    var w = parseFloat(r.attributes.width.value) * frames.attributes.width.value / 100 - 3;
+    var txt = find_child(e, "title").textContent.replace(/\([^(]*\)$/,"");
+    t.attributes.x.value = format_percent((parseFloat(r.attributes.x.value) + (100 * 3 / frames.attributes.width.value)));
+
+    // Smaller than this size won't fit anything
+    if (w < 2 * fontsize * fontwidth) {
+        t.textContent = "";
+        return;
+    }
+    t.textContent = txt;
+    // Fit in full text width
+    if (t.getComputedTextLength() < w)
+        return;
+    if (truncate_text_right) {
+        // Truncate the right side of the text.
+        for (var x = txt.length - 2; x > 0; x--) {
+            if (t.getSubStringLength(0, x + 2) <= w) {
+                t.textContent = txt.substring(0, x) + "..";
+                return;
+            }
+        }
+    } else {
+        // Truncate the left side of the text.
+        for (var x = 2; x < txt.length; x++) {
+            if (t.getSubStringLength(x - 2, txt.length) <= w) {
+                t.textContent = ".." + txt.substring(x, txt.length);
+                return;
+            }
+        }
+    }
+    t.textContent = "";
+}
+// zoom
+function zoom_reset(e) {
+    if (e.tagName == "rect") {
+        e.attributes.x.value = format_percent(100 * parseInt(e.attributes["fg:x"].value) / total_samples);
+        e.attributes.width.value = format_percent(100 * parseInt(e.attributes["fg:w"].value) / total_samples);
+    }
+    if (e.childNodes == undefined) return;
+    for(var i = 0, c = e.childNodes; i < c.length; i++) {
+        zoom_reset(c[i]);
+    }
+}
+function zoom_child(e, x, zoomed_width_samples) {
+    if (e.tagName == "text") {
+        var parent_x = parseFloat(find_child(e.parentNode, "rect[x]").attributes.x.value);
+        e.attributes.x.value = format_percent(parent_x + (100 * 3 / frames.attributes.width.value));
+    } else if (e.tagName == "rect") {
+        e.attributes.x.value = format_percent(100 * (parseInt(e.attributes["fg:x"].value) - x) / zoomed_width_samples);
+        e.attributes.width.value = format_percent(100 * parseInt(e.attributes["fg:w"].value) / zoomed_width_samples);
+    }
+    if (e.childNodes == undefined) return;
+    for(var i = 0, c = e.childNodes; i < c.length; i++) {
+        zoom_child(c[i], x, zoomed_width_samples);
+    }
+}
+function zoom_parent(e) {
+    if (e.attributes) {
+        if (e.attributes.x != undefined) {
+            e.attributes.x.value = "0.0%";
+        }
+        if (e.attributes.width != undefined) {
+            e.attributes.width.value = "100.0%";
+        }
+    }
+    if (e.childNodes == undefined) return;
+    for(var i = 0, c = e.childNodes; i < c.length; i++) {
+        zoom_parent(c[i]);
+    }
+}
+function zoom(node) {
+    var attr = find_child(node, "rect").attributes;
+    var width = parseInt(attr["fg:w"].value);
+    var xmin = parseInt(attr["fg:x"].value);
+    var xmax = xmin + width;
+    var ymin = parseFloat(attr.y.value);
+    unzoombtn.classList.remove("hide");
+    var el = frames.children;
+    var to_update_text = [];
+    for (var i = 0; i < el.length; i++) {
+        var e = el[i];
+        var a = find_child(e, "rect").attributes;
+        var ex = parseInt(a["fg:x"].value);
+        var ew = parseInt(a["fg:w"].value);
+        // Is it an ancestor
+        if (!inverted) {
+            var upstack = parseFloat(a.y.value) > ymin;
+        } else {
+            var upstack = parseFloat(a.y.value) < ymin;
+        }
+        if (upstack) {
+            // Direct ancestor
+            if (ex <= xmin && (ex+ew) >= xmax) {
+                e.classList.add("parent");
+                zoom_parent(e);
+                to_update_text.push(e);
+            }
+            // not in current path
+            else
+                e.classList.add("hide");
+        }
+        // Children maybe
+        else {
+            // no common path
+            if (ex < xmin || ex >= xmax) {
+                e.classList.add("hide");
+            }
+            else {
+                zoom_child(e, xmin, width);
+                to_update_text.push(e);
+            }
+        }
+    }
+    update_text_for_elements(to_update_text);
+}
+function unzoom() {
+    unzoombtn.classList.add("hide");
+    var el = frames.children;
+    for(var i = 0; i < el.length; i++) {
+        el[i].classList.remove("parent");
+        el[i].classList.remove("hide");
+        zoom_reset(el[i]);
+    }
+    update_text_for_elements(el);
+}
+// search
+function reset_search() {
+    var el = document.querySelectorAll("#frames rect");
+    for (var i = 0; i < el.length; i++) {
+        orig_load(el[i], "fill")
+    }
+    var params = get_params();
+    delete params.s;
+    history.replaceState(null, null, parse_params(params));
+}
+function search_prompt() {
+    if (!searching) {
+        var term = prompt("Enter a search term (regexp " +
+            "allowed, eg: ^ext4_)", "");
+        if (term != null) {
+            search(term)
+        }
+    } else {
+        reset_search();
+        searching = 0;
+        searchbtn.classList.remove("show");
+        searchbtn.firstChild.nodeValue = "Search"
+        matchedtxt.classList.add("hide");
+        matchedtxt.firstChild.nodeValue = ""
+    }
+}
+function search(term) {
+    var re = new RegExp(term);
+    var el = frames.children;
+    var matches = new Object();
+    var maxwidth = 0;
+    for (var i = 0; i < el.length; i++) {
+        var e = el[i];
+        // Skip over frames which are either not visible, or below the zoomed-to frame
+        if (e.classList.contains("hide") || e.classList.contains("parent")) {
+            continue;
+        }
+        var func = g_to_func(e);
+        var rect = find_child(e, "rect");
+        if (func == null || rect == null)
+            continue;
+        // Save max width. Only works as we have a root frame
+        var w = parseInt(rect.attributes["fg:w"].value);
+        if (w > maxwidth)
+            maxwidth = w;
+        if (func.match(re)) {
+            // highlight
+            var x = parseInt(rect.attributes["fg:x"].value);
+            orig_save(rect, "fill");
+            rect.attributes.fill.value = searchcolor;
+            // remember matches
+            if (matches[x] == undefined) {
+                matches[x] = w;
+            } else {
+                if (w > matches[x]) {
+                    // overwrite with parent
+                    matches[x] = w;
+                }
+            }
+            searching = 1;
+        }
+    }
+    if (!searching)
+        return;
+    var params = get_params();
+    params.s = term;
+    history.replaceState(null, null, parse_params(params));
+
+    searchbtn.classList.add("show");
+    searchbtn.firstChild.nodeValue = "Reset Search";
+    // calculate percent matched, excluding vertical overlap
+    var count = 0;
+    var lastx = -1;
+    var lastw = 0;
+    var keys = Array();
+    for (k in matches) {
+        if (matches.hasOwnProperty(k))
+            keys.push(k);
+    }
+    // sort the matched frames by their x location
+    // ascending, then width descending
+    keys.sort(function(a, b){
+        return a - b;
+    });
+    // Step through frames saving only the biggest bottom-up frames
+    // thanks to the sort order. This relies on the tree property
+    // where children are always smaller than their parents.
+    for (var k in keys) {
+        var x = parseInt(keys[k]);
+        var w = matches[keys[k]];
+        if (x >= lastx + lastw) {
+            count += w;
+            lastx = x;
+            lastw = w;
+        }
+    }
+    // display matched percent
+    matchedtxt.classList.remove("hide");
+    var pct = 100 * count / maxwidth;
+    if (pct != 100) pct = pct.toFixed(1);
+    matchedtxt.firstChild.nodeValue = "Matched: " + pct + "%";
+}
+function format_percent(n) {
+    return n.toFixed(4) + "%";
+}
+]]></script><rect x="0" y="0" width="100%" height="346" fill="url(#background)"/><text id="title" fill="rgb(0,0,0)" x="50.0000%" y="24.00">py-spy record --format flamegraph --rate 300 -o D:\ChronoTrace\ChronoTrace\benchmarks\flamegraphs\after\json_pipeline.svg -- C:\Python314\python.exe D:\ChronoTrace\ChronoTrace\benchmarks\profile_recorder.py record json_pipeline --repeat 1</text><text id="details" fill="rgb(0,0,0)" x="10" y="40.00"> </text><text id="unzoom" class="hide" fill="rgb(0,0,0)" x="10" y="24.00">Reset Zoom</text><text id="search" fill="rgb(0,0,0)" x="1190" y="24.00">Search</text><text id="matched" fill="rgb(0,0,0)" x="1190" y="335.00"> </text><svg id="frames" x="10" width="1180" total_samples="4618"><g><title>main (profile_recorder.py:179) (5 samples, 0.11%)</title><rect x="0.0000%" y="84" width="0.1083%" height="15" fill="rgb(227,0,7)" fg:x="0" fg:w="5"/><text x="0.2500%" y="94.50"></text></g><g><title>__init__ (argparse.py:1914) (5 samples, 0.11%)</title><rect x="0.0000%" y="100" width="0.1083%" height="15" fill="rgb(217,0,24)" fg:x="0" fg:w="5"/><text x="0.2500%" y="110.50"></text></g><g><title>add_argument (argparse.py:1553) (5 samples, 0.11%)</title><rect x="0.0000%" y="116" width="0.1083%" height="15" fill="rgb(221,193,54)" fg:x="0" fg:w="5"/><text x="0.2500%" y="126.50"></text></g><g><title>_get_validation_formatter (argparse.py:2735) (5 samples, 0.11%)</title><rect x="0.0000%" y="132" width="0.1083%" height="15" fill="rgb(248,212,6)" fg:x="0" fg:w="5"/><text x="0.2500%" y="142.50"></text></g><g><title>_get_formatter (argparse.py:2727) (5 samples, 0.11%)</title><rect x="0.0000%" y="148" width="0.1083%" height="15" fill="rgb(208,68,35)" fg:x="0" fg:w="5"/><text x="0.2500%" y="158.50"></text></g><g><title>_on_line (chronotrace\recorder\recorder.py:301) (5 samples, 0.11%)</title><rect x="0.4981%" y="148" width="0.1083%" height="15" fill="rgb(232,128,0)" fg:x="23" fg:w="5"/><text x="0.7481%" y="158.50"></text></g><g><title>_capture_locals (chronotrace\recorder\recorder.py:340) (12 samples, 0.26%)</title><rect x="0.6280%" y="164" width="0.2599%" height="15" fill="rgb(207,160,47)" fg:x="29" fg:w="12"/><text x="0.8780%" y="174.50"></text></g><g><title>should_redact (chronotrace\recorder\redact.py:109) (12 samples, 0.26%)</title><rect x="0.6280%" y="180" width="0.2599%" height="15" fill="rgb(228,23,34)" fg:x="29" fg:w="12"/><text x="0.8780%" y="190.50"></text></g><g><title>_tagged (chronotrace\recorder\capture.py:250) (6 samples, 0.13%)</title><rect x="1.4292%" y="228" width="0.1299%" height="15" fill="rgb(218,30,26)" fg:x="66" fg:w="6"/><text x="1.6792%" y="238.50"></text></g><g><title>_mapping (chronotrace\recorder\capture.py:210) (8 samples, 0.17%)</title><rect x="1.4292%" y="212" width="0.1732%" height="15" fill="rgb(220,122,19)" fg:x="66" fg:w="8"/><text x="1.6792%" y="222.50"></text></g><g><title>_object (chronotrace\recorder\capture.py:225) (7 samples, 0.15%)</title><rect x="1.6457%" y="212" width="0.1516%" height="15" fill="rgb(250,228,42)" fg:x="76" fg:w="7"/><text x="1.8957%" y="222.50"></text></g><g><title>_handler_for (chronotrace\recorder\capture.py:384) (5 samples, 0.11%)</title><rect x="3.4214%" y="244" width="0.1083%" height="15" fill="rgb(240,193,28)" fg:x="158" fg:w="5"/><text x="3.6714%" y="254.50"></text></g><g><title>_capture (chronotrace\recorder\capture.py:157) (12 samples, 0.26%)</title><rect x="3.3348%" y="228" width="0.2599%" height="15" fill="rgb(216,20,37)" fg:x="154" fg:w="12"/><text x="3.5848%" y="238.50"></text></g><g><title>_cycle_or_depth (chronotrace\recorder\capture.py:271) (11 samples, 0.24%)</title><rect x="3.8761%" y="260" width="0.2382%" height="15" fill="rgb(206,188,39)" fg:x="179" fg:w="11"/><text x="4.1261%" y="270.50"></text></g><g><title>_mapping (chronotrace\recorder\capture.py:201) (31 samples, 0.67%)</title><rect x="3.6812%" y="244" width="0.6713%" height="15" fill="rgb(217,207,13)" fg:x="170" fg:w="31"/><text x="3.9312%" y="254.50"></text></g><g><title>_cycle_or_depth (chronotrace\recorder\capture.py:274) (9 samples, 0.19%)</title><rect x="4.1576%" y="260" width="0.1949%" height="15" fill="rgb(231,73,38)" fg:x="192" fg:w="9"/><text x="4.4076%" y="270.50"></text></g><g><title>_mapping (chronotrace\recorder\capture.py:205) (20 samples, 0.43%)</title><rect x="4.3742%" y="244" width="0.4331%" height="15" fill="rgb(225,20,46)" fg:x="202" fg:w="20"/><text x="4.6242%" y="254.50"></text></g><g><title>_capture (chronotrace\recorder\capture.py:142) (7 samples, 0.15%)</title><rect x="5.4353%" y="260" width="0.1516%" height="15" fill="rgb(210,31,41)" fg:x="251" fg:w="7"/><text x="5.6853%" y="270.50"></text></g><g><title>_capture (chronotrace\recorder\capture.py:144) (29 samples, 0.63%)</title><rect x="5.6301%" y="260" width="0.6280%" height="15" fill="rgb(221,200,47)" fg:x="260" fg:w="29"/><text x="5.8801%" y="270.50"></text></g><g><title>_capture (chronotrace\recorder\capture.py:151) (7 samples, 0.15%)</title><rect x="6.2581%" y="260" width="0.1516%" height="15" fill="rgb(226,26,5)" fg:x="289" fg:w="7"/><text x="6.5081%" y="270.50"></text></g><g><title>_capture (chronotrace\recorder\capture.py:152) (35 samples, 0.76%)</title><rect x="6.4097%" y="260" width="0.7579%" height="15" fill="rgb(249,33,26)" fg:x="296" fg:w="35"/><text x="6.6597%" y="270.50"></text></g><g><title>_mapping (chronotrace\recorder\capture.py:206) (132 samples, 2.86%)</title><rect x="4.8073%" y="244" width="2.8584%" height="15" fill="rgb(235,183,28)" fg:x="222" fg:w="132"/><text x="5.0573%" y="254.50">_m..</text></g><g><title>_capture (chronotrace\recorder\capture.py:154) (20 samples, 0.43%)</title><rect x="7.2326%" y="260" width="0.4331%" height="15" fill="rgb(221,5,38)" fg:x="334" fg:w="20"/><text x="7.4826%" y="270.50"></text></g><g><title>_mapping (chronotrace\recorder\capture.py:207) (25 samples, 0.54%)</title><rect x="7.6657%" y="244" width="0.5414%" height="15" fill="rgb(247,18,42)" fg:x="354" fg:w="25"/><text x="7.9157%" y="254.50"></text></g><g><title>_mapping (chronotrace\recorder\capture.py:209) (6 samples, 0.13%)</title><rect x="8.2070%" y="244" width="0.1299%" height="15" fill="rgb(241,131,45)" fg:x="379" fg:w="6"/><text x="8.4570%" y="254.50"></text></g><g><title>of (chronotrace\recorder\identity.py:121) (11 samples, 0.24%)</title><rect x="9.0732%" y="276" width="0.2382%" height="15" fill="rgb(249,31,29)" fg:x="419" fg:w="11"/><text x="9.3232%" y="286.50"></text></g><g><title>of (chronotrace\recorder\identity.py:122) (8 samples, 0.17%)</title><rect x="9.3114%" y="276" width="0.1732%" height="15" fill="rgb(225,111,53)" fg:x="430" fg:w="8"/><text x="9.5614%" y="286.50"></text></g><g><title>of (chronotrace\recorder\identity.py:126) (82 samples, 1.78%)</title><rect x="9.5279%" y="276" width="1.7757%" height="15" fill="rgb(238,160,17)" fg:x="440" fg:w="82"/><text x="9.7779%" y="286.50">o..</text></g><g><title>__new__ (chronotrace\recorder\identity.py:81) (53 samples, 1.15%)</title><rect x="10.1559%" y="292" width="1.1477%" height="15" fill="rgb(214,148,48)" fg:x="469" fg:w="53"/><text x="10.4059%" y="302.50"></text></g><g><title>of (chronotrace\recorder\identity.py:127) (17 samples, 0.37%)</title><rect x="11.3036%" y="276" width="0.3681%" height="15" fill="rgb(232,36,49)" fg:x="522" fg:w="17"/><text x="11.5536%" y="286.50"></text></g><g><title>_tagged (chronotrace\recorder\capture.py:250) (129 samples, 2.79%)</title><rect x="8.9649%" y="260" width="2.7934%" height="15" fill="rgb(209,103,24)" fg:x="414" fg:w="129"/><text x="9.2149%" y="270.50">_t..</text></g><g><title>_sequence (chronotrace\recorder\capture.py:195) (506 samples, 10.96%)</title><rect x="1.8623%" y="212" width="10.9571%" height="15" fill="rgb(229,88,8)" fg:x="86" fg:w="506"/><text x="2.1123%" y="222.50">_sequence (chron..</text></g><g><title>_capture (chronotrace\recorder\capture.py:158) (426 samples, 9.22%)</title><rect x="3.5946%" y="228" width="9.2248%" height="15" fill="rgb(213,181,19)" fg:x="166" fg:w="426"/><text x="3.8446%" y="238.50">_capture (chr..</text></g><g><title>_mapping (chronotrace\recorder\capture.py:210) (207 samples, 4.48%)</title><rect x="8.3369%" y="244" width="4.4825%" height="15" fill="rgb(254,191,54)" fg:x="385" fg:w="207"/><text x="8.5869%" y="254.50">_mapp..</text></g><g><title>_tagged (chronotrace\recorder\capture.py:253) (48 samples, 1.04%)</title><rect x="11.7800%" y="260" width="1.0394%" height="15" fill="rgb(241,83,37)" fg:x="544" fg:w="48"/><text x="12.0300%" y="270.50"></text></g><g><title>_capture_locals (chronotrace\recorder\recorder.py:343) (554 samples, 12.00%)</title><rect x="0.8878%" y="164" width="11.9965%" height="15" fill="rgb(233,36,39)" fg:x="41" fg:w="554"/><text x="1.1378%" y="174.50">_capture_locals (c..</text></g><g><title>capture (chronotrace\recorder\capture.py:138) (534 samples, 11.56%)</title><rect x="1.3209%" y="180" width="11.5634%" height="15" fill="rgb(226,3,54)" fg:x="61" fg:w="534"/><text x="1.5709%" y="190.50">capture (chronotr..</text></g><g><title>_capture (chronotrace\recorder\capture.py:158) (534 samples, 11.56%)</title><rect x="1.3209%" y="196" width="11.5634%" height="15" fill="rgb(245,192,40)" fg:x="61" fg:w="534"/><text x="1.5709%" y="206.50">_capture (chronot..</text></g><g><title>add (chronotrace\recorder\values.py:84) (243 samples, 5.26%)</title><rect x="12.8844%" y="180" width="5.2620%" height="15" fill="rgb(238,167,29)" fg:x="595" fg:w="243"/><text x="13.1344%" y="190.50">add (c..</text></g><g><title>digest (chronotrace\recorder\dedup.py:114) (243 samples, 5.26%)</title><rect x="12.8844%" y="196" width="5.2620%" height="15" fill="rgb(232,182,51)" fg:x="595" fg:w="243"/><text x="13.1344%" y="206.50">digest..</text></g><g><title>add (chronotrace\recorder\values.py:85) (5 samples, 0.11%)</title><rect x="18.1464%" y="180" width="0.1083%" height="15" fill="rgb(231,60,39)" fg:x="838" fg:w="5"/><text x="18.3964%" y="190.50"></text></g><g><title>_capture_locals (chronotrace\recorder\recorder.py:344) (250 samples, 5.41%)</title><rect x="12.8844%" y="164" width="5.4136%" height="15" fill="rgb(208,69,12)" fg:x="595" fg:w="250"/><text x="13.1344%" y="174.50">_captur..</text></g><g><title>_emit (chronotrace\recorder\recorder.py:515) (7 samples, 0.15%)</title><rect x="18.3413%" y="180" width="0.1516%" height="15" fill="rgb(235,93,37)" fg:x="847" fg:w="7"/><text x="18.5913%" y="190.50"></text></g><g><title>_capture_locals (chronotrace\recorder\recorder.py:348) (12 samples, 0.26%)</title><rect x="18.3196%" y="164" width="0.2599%" height="15" fill="rgb(213,116,39)" fg:x="846" fg:w="12"/><text x="18.5696%" y="174.50"></text></g><g><title>json_pipeline (workloads.py:131) (839 samples, 18.17%)</title><rect x="0.4331%" y="132" width="18.1680%" height="15" fill="rgb(222,207,29)" fg:x="20" fg:w="839"/><text x="0.6831%" y="142.50">json_pipeline (workloads.py:..</text></g><g><title>_on_line (chronotrace\recorder\recorder.py:303) (831 samples, 17.99%)</title><rect x="0.6063%" y="148" width="17.9948%" height="15" fill="rgb(206,96,30)" fg:x="28" fg:w="831"/><text x="0.8563%" y="158.50">_on_line (chronotrace\record..</text></g><g><title>_on_line (chronotrace\recorder\recorder.py:301) (5 samples, 0.11%)</title><rect x="18.7311%" y="148" width="0.1083%" height="15" fill="rgb(218,138,4)" fg:x="865" fg:w="5"/><text x="18.9811%" y="158.50"></text></g><g><title>capture (chronotrace\recorder\capture.py:137) (8 samples, 0.17%)</title><rect x="19.0126%" y="180" width="0.1732%" height="15" fill="rgb(250,191,14)" fg:x="878" fg:w="8"/><text x="19.2626%" y="190.50"></text></g><g><title>_capture (chronotrace\recorder\capture.py:152) (7 samples, 0.15%)</title><rect x="19.6622%" y="228" width="0.1516%" height="15" fill="rgb(239,60,40)" fg:x="908" fg:w="7"/><text x="19.9122%" y="238.50"></text></g><g><title>_mapping (chronotrace\recorder\capture.py:201) (10 samples, 0.22%)</title><rect x="19.9220%" y="244" width="0.2165%" height="15" fill="rgb(206,27,48)" fg:x="920" fg:w="10"/><text x="20.1720%" y="254.50"></text></g><g><title>_mapping (chronotrace\recorder\capture.py:205) (7 samples, 0.15%)</title><rect x="20.1602%" y="244" width="0.1516%" height="15" fill="rgb(225,35,8)" fg:x="931" fg:w="7"/><text x="20.4102%" y="254.50"></text></g><g><title>_capture (chronotrace\recorder\capture.py:142) (5 samples, 0.11%)</title><rect x="20.7449%" y="260" width="0.1083%" height="15" fill="rgb(250,213,24)" fg:x="958" fg:w="5"/><text x="20.9949%" y="270.50"></text></g><g><title>_capture (chronotrace\recorder\capture.py:144) (6 samples, 0.13%)</title><rect x="20.8748%" y="260" width="0.1299%" height="15" fill="rgb(247,123,22)" fg:x="964" fg:w="6"/><text x="21.1248%" y="270.50"></text></g><g><title>_capture (chronotrace\recorder\capture.py:151) (6 samples, 0.13%)</title><rect x="21.0048%" y="260" width="0.1299%" height="15" fill="rgb(231,138,38)" fg:x="970" fg:w="6"/><text x="21.2548%" y="270.50"></text></g><g><title>_capture (chronotrace\recorder\capture.py:152) (19 samples, 0.41%)</title><rect x="21.1347%" y="260" width="0.4114%" height="15" fill="rgb(231,145,46)" fg:x="976" fg:w="19"/><text x="21.3847%" y="270.50"></text></g><g><title>_capture (chronotrace\recorder\capture.py:154) (13 samples, 0.28%)</title><rect x="21.5461%" y="260" width="0.2815%" height="15" fill="rgb(251,118,11)" fg:x="995" fg:w="13"/><text x="21.7961%" y="270.50"></text></g><g><title>_mapping (chronotrace\recorder\capture.py:206) (71 samples, 1.54%)</title><rect x="20.3118%" y="244" width="1.5375%" height="15" fill="rgb(217,147,25)" fg:x="938" fg:w="71"/><text x="20.5618%" y="254.50"></text></g><g><title>_mapping (chronotrace\recorder\capture.py:207) (20 samples, 0.43%)</title><rect x="21.8493%" y="244" width="0.4331%" height="15" fill="rgb(247,81,37)" fg:x="1009" fg:w="20"/><text x="22.0993%" y="254.50"></text></g><g><title>of (chronotrace\recorder\identity.py:126) (46 samples, 1.00%)</title><rect x="22.8237%" y="276" width="0.9961%" height="15" fill="rgb(209,12,38)" fg:x="1054" fg:w="46"/><text x="23.0737%" y="286.50"></text></g><g><title>__new__ (chronotrace\recorder\identity.py:81) (21 samples, 0.45%)</title><rect x="23.3651%" y="292" width="0.4547%" height="15" fill="rgb(227,1,9)" fg:x="1079" fg:w="21"/><text x="23.6151%" y="302.50"></text></g><g><title>of (chronotrace\recorder\identity.py:127) (13 samples, 0.28%)</title><rect x="23.8198%" y="276" width="0.2815%" height="15" fill="rgb(248,47,43)" fg:x="1100" fg:w="13"/><text x="24.0698%" y="286.50"></text></g><g><title>_tagged (chronotrace\recorder\capture.py:250) (70 samples, 1.52%)</title><rect x="22.6072%" y="260" width="1.5158%" height="15" fill="rgb(221,10,30)" fg:x="1044" fg:w="70"/><text x="22.8572%" y="270.50"></text></g><g><title>_sequence (chronotrace\recorder\capture.py:195) (257 samples, 5.57%)</title><rect x="19.3157%" y="212" width="5.5652%" height="15" fill="rgb(210,229,1)" fg:x="892" fg:w="257"/><text x="19.5657%" y="222.50">_sequen..</text></g><g><title>_capture (chronotrace\recorder\capture.py:158) (230 samples, 4.98%)</title><rect x="19.9004%" y="228" width="4.9805%" height="15" fill="rgb(222,148,37)" fg:x="919" fg:w="230"/><text x="20.1504%" y="238.50">_captu..</text></g><g><title>_mapping (chronotrace\recorder\capture.py:210) (116 samples, 2.51%)</title><rect x="22.3690%" y="244" width="2.5119%" height="15" fill="rgb(234,67,33)" fg:x="1033" fg:w="116"/><text x="22.6190%" y="254.50">_m..</text></g><g><title>_tagged (chronotrace\recorder\capture.py:253) (35 samples, 0.76%)</title><rect x="24.1230%" y="260" width="0.7579%" height="15" fill="rgb(247,98,35)" fg:x="1114" fg:w="35"/><text x="24.3730%" y="270.50"></text></g><g><title>_capture_locals (chronotrace\recorder\recorder.py:343) (277 samples, 6.00%)</title><rect x="18.9043%" y="164" width="5.9983%" height="15" fill="rgb(247,138,52)" fg:x="873" fg:w="277"/><text x="19.1543%" y="174.50">_capture..</text></g><g><title>capture (chronotrace\recorder\capture.py:138) (264 samples, 5.72%)</title><rect x="19.1858%" y="180" width="5.7168%" height="15" fill="rgb(213,79,30)" fg:x="886" fg:w="264"/><text x="19.4358%" y="190.50">capture..</text></g><g><title>_capture (chronotrace\recorder\capture.py:158) (261 samples, 5.65%)</title><rect x="19.2508%" y="196" width="5.6518%" height="15" fill="rgb(246,177,23)" fg:x="889" fg:w="261"/><text x="19.5008%" y="206.50">_captur..</text></g><g><title>add (chronotrace\recorder\values.py:84) (105 samples, 2.27%)</title><rect x="24.9459%" y="180" width="2.2737%" height="15" fill="rgb(230,62,27)" fg:x="1152" fg:w="105"/><text x="25.1959%" y="190.50">a..</text></g><g><title>digest (chronotrace\recorder\dedup.py:114) (105 samples, 2.27%)</title><rect x="24.9459%" y="196" width="2.2737%" height="15" fill="rgb(216,154,8)" fg:x="1152" fg:w="105"/><text x="25.1959%" y="206.50">d..</text></g><g><title>_on_line (chronotrace\recorder\recorder.py:303) (390 samples, 8.45%)</title><rect x="18.8393%" y="148" width="8.4452%" height="15" fill="rgb(244,35,45)" fg:x="870" fg:w="390"/><text x="19.0893%" y="158.50">_on_line (ch..</text></g><g><title>_capture_locals (chronotrace\recorder\recorder.py:344) (110 samples, 2.38%)</title><rect x="24.9026%" y="164" width="2.3820%" height="15" fill="rgb(251,115,12)" fg:x="1150" fg:w="110"/><text x="25.1526%" y="174.50">_c..</text></g><g><title>_strptime (_strptime.py:529) (24 samples, 0.52%)</title><rect x="27.2845%" y="164" width="0.5197%" height="15" fill="rgb(240,54,50)" fg:x="1260" fg:w="24"/><text x="27.5345%" y="174.50"></text></g><g><title>_getlang (_strptime.py:31) (24 samples, 0.52%)</title><rect x="27.2845%" y="180" width="0.5197%" height="15" fill="rgb(233,84,52)" fg:x="1260" fg:w="24"/><text x="27.5345%" y="190.50"></text></g><g><title>getlocale (locale.py:600) (23 samples, 0.50%)</title><rect x="27.3062%" y="196" width="0.4981%" height="15" fill="rgb(207,117,47)" fg:x="1261" fg:w="23"/><text x="27.5562%" y="206.50"></text></g><g><title>json_pipeline (workloads.py:132) (427 samples, 9.25%)</title><rect x="18.6011%" y="132" width="9.2464%" height="15" fill="rgb(249,43,39)" fg:x="859" fg:w="427"/><text x="18.8511%" y="142.50">json_pipeline..</text></g><g><title>_strptime_datetime_datetime (_strptime.py:815) (26 samples, 0.56%)</title><rect x="27.2845%" y="148" width="0.5630%" height="15" fill="rgb(209,38,44)" fg:x="1260" fg:w="26"/><text x="27.5345%" y="158.50"></text></g><g><title>_on_line (chronotrace\recorder\recorder.py:301) (5 samples, 0.11%)</title><rect x="27.8476%" y="148" width="0.1083%" height="15" fill="rgb(236,212,23)" fg:x="1286" fg:w="5"/><text x="28.0976%" y="158.50"></text></g><g><title>_mapping (chronotrace\recorder\capture.py:201) (14 samples, 0.30%)</title><rect x="29.0169%" y="244" width="0.3032%" height="15" fill="rgb(242,79,21)" fg:x="1340" fg:w="14"/><text x="29.2669%" y="254.50"></text></g><g><title>_cycle_or_depth (chronotrace\recorder\capture.py:274) (7 samples, 0.15%)</title><rect x="29.1685%" y="260" width="0.1516%" height="15" fill="rgb(211,96,35)" fg:x="1347" fg:w="7"/><text x="29.4185%" y="270.50"></text></g><g><title>_mapping (chronotrace\recorder\capture.py:205) (9 samples, 0.19%)</title><rect x="29.3417%" y="244" width="0.1949%" height="15" fill="rgb(253,215,40)" fg:x="1355" fg:w="9"/><text x="29.5917%" y="254.50"></text></g><g><title>_capture (chronotrace\recorder\capture.py:142) (8 samples, 0.17%)</title><rect x="30.0346%" y="260" width="0.1732%" height="15" fill="rgb(211,81,21)" fg:x="1387" fg:w="8"/><text x="30.2846%" y="270.50"></text></g><g><title>_capture (chronotrace\recorder\capture.py:152) (15 samples, 0.32%)</title><rect x="30.3378%" y="260" width="0.3248%" height="15" fill="rgb(208,190,38)" fg:x="1401" fg:w="15"/><text x="30.5878%" y="270.50"></text></g><g><title>_mapping (chronotrace\recorder\capture.py:206) (65 samples, 1.41%)</title><rect x="29.5366%" y="244" width="1.4075%" height="15" fill="rgb(235,213,38)" fg:x="1364" fg:w="65"/><text x="29.7866%" y="254.50"></text></g><g><title>_capture (chronotrace\recorder\capture.py:154) (12 samples, 0.26%)</title><rect x="30.6843%" y="260" width="0.2599%" height="15" fill="rgb(237,122,38)" fg:x="1417" fg:w="12"/><text x="30.9343%" y="270.50"></text></g><g><title>_mapping (chronotrace\recorder\capture.py:207) (24 samples, 0.52%)</title><rect x="30.9441%" y="244" width="0.5197%" height="15" fill="rgb(244,218,35)" fg:x="1429" fg:w="24"/><text x="31.1941%" y="254.50"></text></g><g><title>of (chronotrace\recorder\identity.py:126) (50 samples, 1.08%)</title><rect x="32.0702%" y="276" width="1.0827%" height="15" fill="rgb(240,68,47)" fg:x="1481" fg:w="50"/><text x="32.3202%" y="286.50"></text></g><g><title>__new__ (chronotrace\recorder\identity.py:81) (37 samples, 0.80%)</title><rect x="32.3517%" y="292" width="0.8012%" height="15" fill="rgb(210,16,53)" fg:x="1494" fg:w="37"/><text x="32.6017%" y="302.50"></text></g><g><title>_tagged (chronotrace\recorder\capture.py:250) (64 samples, 1.39%)</title><rect x="31.8320%" y="260" width="1.3859%" height="15" fill="rgb(235,124,12)" fg:x="1470" fg:w="64"/><text x="32.0820%" y="270.50"></text></g><g><title>_sequence (chronotrace\recorder\capture.py:195) (265 samples, 5.74%)</title><rect x="28.4755%" y="212" width="5.7384%" height="15" fill="rgb(224,169,11)" fg:x="1315" fg:w="265"/><text x="28.7255%" y="222.50">_sequen..</text></g><g><title>_capture (chronotrace\recorder\capture.py:158) (240 samples, 5.20%)</title><rect x="29.0169%" y="228" width="5.1971%" height="15" fill="rgb(250,166,2)" fg:x="1340" fg:w="240"/><text x="29.2669%" y="238.50">_captu..</text></g><g><title>_mapping (chronotrace\recorder\capture.py:210) (124 samples, 2.69%)</title><rect x="31.5288%" y="244" width="2.6851%" height="15" fill="rgb(242,216,29)" fg:x="1456" fg:w="124"/><text x="31.7788%" y="254.50">_m..</text></g><g><title>_tagged (chronotrace\recorder\capture.py:253) (45 samples, 0.97%)</title><rect x="33.2395%" y="260" width="0.9744%" height="15" fill="rgb(230,116,27)" fg:x="1535" fg:w="45"/><text x="33.4895%" y="270.50"></text></g><g><title>_capture_locals (chronotrace\recorder\recorder.py:343) (286 samples, 6.19%)</title><rect x="28.0641%" y="164" width="6.1932%" height="15" fill="rgb(228,99,48)" fg:x="1296" fg:w="286"/><text x="28.3141%" y="174.50">_capture..</text></g><g><title>capture (chronotrace\recorder\capture.py:138) (273 samples, 5.91%)</title><rect x="28.3456%" y="180" width="5.9117%" height="15" fill="rgb(253,11,6)" fg:x="1309" fg:w="273"/><text x="28.5956%" y="190.50">capture ..</text></g><g><title>_capture (chronotrace\recorder\capture.py:158) (273 samples, 5.91%)</title><rect x="28.3456%" y="196" width="5.9117%" height="15" fill="rgb(247,143,39)" fg:x="1309" fg:w="273"/><text x="28.5956%" y="206.50">_capture..</text></g><g><title>json_pipeline (workloads.py:133) (414 samples, 8.96%)</title><rect x="27.8476%" y="132" width="8.9649%" height="15" fill="rgb(236,97,10)" fg:x="1286" fg:w="414"/><text x="28.0976%" y="142.50">json_pipeline..</text></g><g><title>_on_line (chronotrace\recorder\recorder.py:303) (409 samples, 8.86%)</title><rect x="27.9558%" y="148" width="8.8566%" height="15" fill="rgb(233,208,19)" fg:x="1291" fg:w="409"/><text x="28.2058%" y="158.50">_on_line (chr..</text></g><g><title>_capture_locals (chronotrace\recorder\recorder.py:344) (118 samples, 2.56%)</title><rect x="34.2573%" y="164" width="2.5552%" height="15" fill="rgb(216,164,2)" fg:x="1582" fg:w="118"/><text x="34.5073%" y="174.50">_c..</text></g><g><title>add (chronotrace\recorder\values.py:84) (118 samples, 2.56%)</title><rect x="34.2573%" y="180" width="2.5552%" height="15" fill="rgb(220,129,5)" fg:x="1582" fg:w="118"/><text x="34.5073%" y="190.50">ad..</text></g><g><title>digest (chronotrace\recorder\dedup.py:114) (118 samples, 2.56%)</title><rect x="34.2573%" y="196" width="2.5552%" height="15" fill="rgb(242,17,10)" fg:x="1582" fg:w="118"/><text x="34.5073%" y="206.50">di..</text></g><g><title>capture (chronotrace\recorder\capture.py:137) (8 samples, 0.17%)</title><rect x="37.0723%" y="180" width="0.1732%" height="15" fill="rgb(242,107,0)" fg:x="1712" fg:w="8"/><text x="37.3223%" y="190.50"></text></g><g><title>_capture (chronotrace\recorder\capture.py:144) (18 samples, 0.39%)</title><rect x="37.5704%" y="228" width="0.3898%" height="15" fill="rgb(251,28,31)" fg:x="1735" fg:w="18"/><text x="37.8204%" y="238.50"></text></g><g><title>_mapping (chronotrace\recorder\capture.py:201) (15 samples, 0.32%)</title><rect x="38.0251%" y="244" width="0.3248%" height="15" fill="rgb(233,223,10)" fg:x="1756" fg:w="15"/><text x="38.2751%" y="254.50"></text></g><g><title>_cycle_or_depth (chronotrace\recorder\capture.py:274) (6 samples, 0.13%)</title><rect x="38.2200%" y="260" width="0.1299%" height="15" fill="rgb(215,21,27)" fg:x="1765" fg:w="6"/><text x="38.4700%" y="270.50"></text></g><g><title>_mapping (chronotrace\recorder\capture.py:205) (11 samples, 0.24%)</title><rect x="38.3499%" y="244" width="0.2382%" height="15" fill="rgb(232,23,21)" fg:x="1771" fg:w="11"/><text x="38.5999%" y="254.50"></text></g><g><title>_capture (chronotrace\recorder\capture.py:144) (8 samples, 0.17%)</title><rect x="39.3460%" y="260" width="0.1732%" height="15" fill="rgb(244,5,23)" fg:x="1817" fg:w="8"/><text x="39.5960%" y="270.50"></text></g><g><title>_capture (chronotrace\recorder\capture.py:152) (13 samples, 0.28%)</title><rect x="39.5409%" y="260" width="0.2815%" height="15" fill="rgb(226,81,46)" fg:x="1826" fg:w="13"/><text x="39.7909%" y="270.50"></text></g><g><title>_mapping (chronotrace\recorder\capture.py:206) (68 samples, 1.47%)</title><rect x="38.5881%" y="244" width="1.4725%" height="15" fill="rgb(247,70,30)" fg:x="1782" fg:w="68"/><text x="38.8381%" y="254.50"></text></g><g><title>_capture (chronotrace\recorder\capture.py:154) (10 samples, 0.22%)</title><rect x="39.8441%" y="260" width="0.2165%" height="15" fill="rgb(212,68,19)" fg:x="1840" fg:w="10"/><text x="40.0941%" y="270.50"></text></g><g><title>_mapping (chronotrace\recorder\capture.py:207) (16 samples, 0.35%)</title><rect x="40.0606%" y="244" width="0.3465%" height="15" fill="rgb(240,187,13)" fg:x="1850" fg:w="16"/><text x="40.3106%" y="254.50"></text></g><g><title>_mapping (chronotrace\recorder\capture.py:209) (5 samples, 0.11%)</title><rect x="40.4071%" y="244" width="0.1083%" height="15" fill="rgb(223,113,26)" fg:x="1866" fg:w="5"/><text x="40.6571%" y="254.50"></text></g><g><title>__new__ (chronotrace\recorder\identity.py:80) (5 samples, 0.11%)</title><rect x="41.3816%" y="292" width="0.1083%" height="15" fill="rgb(206,192,2)" fg:x="1911" fg:w="5"/><text x="41.6316%" y="302.50"></text></g><g><title>of (chronotrace\recorder\identity.py:126) (38 samples, 0.82%)</title><rect x="41.0351%" y="276" width="0.8229%" height="15" fill="rgb(241,108,4)" fg:x="1895" fg:w="38"/><text x="41.2851%" y="286.50"></text></g><g><title>__new__ (chronotrace\recorder\identity.py:81) (17 samples, 0.37%)</title><rect x="41.4898%" y="292" width="0.3681%" height="15" fill="rgb(247,173,49)" fg:x="1916" fg:w="17"/><text x="41.7398%" y="302.50"></text></g><g><title>of (chronotrace\recorder\identity.py:127) (7 samples, 0.15%)</title><rect x="41.8579%" y="276" width="0.1516%" height="15" fill="rgb(224,114,35)" fg:x="1933" fg:w="7"/><text x="42.1079%" y="286.50"></text></g><g><title>_tagged (chronotrace\recorder\capture.py:250) (57 samples, 1.23%)</title><rect x="40.8185%" y="260" width="1.2343%" height="15" fill="rgb(245,159,27)" fg:x="1885" fg:w="57"/><text x="41.0685%" y="270.50"></text></g><g><title>_tagged (chronotrace\recorder\capture.py:253) (30 samples, 0.65%)</title><rect x="42.0528%" y="260" width="0.6496%" height="15" fill="rgb(245,172,44)" fg:x="1942" fg:w="30"/><text x="42.3028%" y="270.50"></text></g><g><title>_capture_locals (chronotrace\recorder\recorder.py:343) (266 samples, 5.76%)</title><rect x="36.9641%" y="164" width="5.7601%" height="15" fill="rgb(236,23,11)" fg:x="1707" fg:w="266"/><text x="37.2141%" y="174.50">_captur..</text></g><g><title>capture (chronotrace\recorder\capture.py:138) (253 samples, 5.48%)</title><rect x="37.2456%" y="180" width="5.4786%" height="15" fill="rgb(205,117,38)" fg:x="1720" fg:w="253"/><text x="37.4956%" y="190.50">capture..</text></g><g><title>_capture (chronotrace\recorder\capture.py:158) (252 samples, 5.46%)</title><rect x="37.2672%" y="196" width="5.4569%" height="15" fill="rgb(237,72,25)" fg:x="1721" fg:w="252"/><text x="37.5172%" y="206.50">_captur..</text></g><g><title>_sequence (chronotrace\recorder\capture.py:195) (243 samples, 5.26%)</title><rect x="37.4621%" y="212" width="5.2620%" height="15" fill="rgb(244,70,9)" fg:x="1730" fg:w="243"/><text x="37.7121%" y="222.50">_seque..</text></g><g><title>_capture (chronotrace\recorder\capture.py:158) (218 samples, 4.72%)</title><rect x="38.0035%" y="228" width="4.7207%" height="15" fill="rgb(217,125,39)" fg:x="1755" fg:w="218"/><text x="38.2535%" y="238.50">_captu..</text></g><g><title>_mapping (chronotrace\recorder\capture.py:210) (102 samples, 2.21%)</title><rect x="40.5154%" y="244" width="2.2087%" height="15" fill="rgb(235,36,10)" fg:x="1871" fg:w="102"/><text x="40.7654%" y="254.50">_..</text></g><g><title>_capture_locals (chronotrace\recorder\recorder.py:344) (104 samples, 2.25%)</title><rect x="42.7241%" y="164" width="2.2521%" height="15" fill="rgb(251,123,47)" fg:x="1973" fg:w="104"/><text x="42.9741%" y="174.50">_..</text></g><g><title>add (chronotrace\recorder\values.py:84) (104 samples, 2.25%)</title><rect x="42.7241%" y="180" width="2.2521%" height="15" fill="rgb(221,13,13)" fg:x="1973" fg:w="104"/><text x="42.9741%" y="190.50">a..</text></g><g><title>digest (chronotrace\recorder\dedup.py:114) (104 samples, 2.25%)</title><rect x="42.7241%" y="196" width="2.2521%" height="15" fill="rgb(238,131,9)" fg:x="1973" fg:w="104"/><text x="42.9741%" y="206.50">d..</text></g><g><title>json_pipeline (workloads.py:134) (378 samples, 8.19%)</title><rect x="36.8125%" y="132" width="8.1854%" height="15" fill="rgb(211,50,8)" fg:x="1700" fg:w="378"/><text x="37.0625%" y="142.50">json_pipeli..</text></g><g><title>_on_line (chronotrace\recorder\recorder.py:303) (375 samples, 8.12%)</title><rect x="36.8774%" y="148" width="8.1204%" height="15" fill="rgb(245,182,24)" fg:x="1703" fg:w="375"/><text x="37.1274%" y="158.50">_on_line (c..</text></g><g><title>_capture (chronotrace\recorder\capture.py:157) (7 samples, 0.15%)</title><rect x="45.9073%" y="228" width="0.1516%" height="15" fill="rgb(242,14,37)" fg:x="2120" fg:w="7"/><text x="46.1573%" y="238.50"></text></g><g><title>_cycle_or_depth (chronotrace\recorder\capture.py:271) (6 samples, 0.13%)</title><rect x="46.1888%" y="260" width="0.1299%" height="15" fill="rgb(246,228,12)" fg:x="2133" fg:w="6"/><text x="46.4388%" y="270.50"></text></g><g><title>_cycle_or_depth (chronotrace\recorder\capture.py:272) (6 samples, 0.13%)</title><rect x="46.3188%" y="260" width="0.1299%" height="15" fill="rgb(213,55,15)" fg:x="2139" fg:w="6"/><text x="46.5688%" y="270.50"></text></g><g><title>_mapping (chronotrace\recorder\capture.py:201) (18 samples, 0.39%)</title><rect x="46.1239%" y="244" width="0.3898%" height="15" fill="rgb(209,9,3)" fg:x="2130" fg:w="18"/><text x="46.3739%" y="254.50"></text></g><g><title>_mapping (chronotrace\recorder\capture.py:205) (8 samples, 0.17%)</title><rect x="46.5353%" y="244" width="0.1732%" height="15" fill="rgb(230,59,30)" fg:x="2149" fg:w="8"/><text x="46.7853%" y="254.50"></text></g><g><title>_capture (chronotrace\recorder\capture.py:144) (12 samples, 0.26%)</title><rect x="47.2499%" y="260" width="0.2599%" height="15" fill="rgb(209,121,21)" fg:x="2182" fg:w="12"/><text x="47.4999%" y="270.50"></text></g><g><title>_capture (chronotrace\recorder\capture.py:151) (6 samples, 0.13%)</title><rect x="47.5097%" y="260" width="0.1299%" height="15" fill="rgb(220,109,13)" fg:x="2194" fg:w="6"/><text x="47.7597%" y="270.50"></text></g><g><title>_capture (chronotrace\recorder\capture.py:152) (18 samples, 0.39%)</title><rect x="47.6397%" y="260" width="0.3898%" height="15" fill="rgb(232,18,1)" fg:x="2200" fg:w="18"/><text x="47.8897%" y="270.50"></text></g><g><title>_mapping (chronotrace\recorder\capture.py:206) (72 samples, 1.56%)</title><rect x="46.7085%" y="244" width="1.5591%" height="15" fill="rgb(215,41,42)" fg:x="2157" fg:w="72"/><text x="46.9585%" y="254.50"></text></g><g><title>_capture (chronotrace\recorder\capture.py:154) (11 samples, 0.24%)</title><rect x="48.0294%" y="260" width="0.2382%" height="15" fill="rgb(224,123,36)" fg:x="2218" fg:w="11"/><text x="48.2794%" y="270.50"></text></g><g><title>_mapping (chronotrace\recorder\capture.py:207) (12 samples, 0.26%)</title><rect x="48.2676%" y="244" width="0.2599%" height="15" fill="rgb(240,125,3)" fg:x="2229" fg:w="12"/><text x="48.5176%" y="254.50"></text></g><g><title>of (chronotrace\recorder\identity.py:126) (44 samples, 0.95%)</title><rect x="49.2204%" y="276" width="0.9528%" height="15" fill="rgb(205,98,50)" fg:x="2273" fg:w="44"/><text x="49.4704%" y="286.50"></text></g><g><title>__new__ (chronotrace\recorder\identity.py:81) (23 samples, 0.50%)</title><rect x="49.6752%" y="292" width="0.4981%" height="15" fill="rgb(205,185,37)" fg:x="2294" fg:w="23"/><text x="49.9252%" y="302.50"></text></g><g><title>_tagged (chronotrace\recorder\capture.py:250) (58 samples, 1.26%)</title><rect x="49.1122%" y="260" width="1.2560%" height="15" fill="rgb(238,207,15)" fg:x="2268" fg:w="58"/><text x="49.3622%" y="270.50"></text></g><g><title>of (chronotrace\recorder\identity.py:127) (9 samples, 0.19%)</title><rect x="50.1732%" y="276" width="0.1949%" height="15" fill="rgb(213,199,42)" fg:x="2317" fg:w="9"/><text x="50.4232%" y="286.50"></text></g><g><title>_sequence (chronotrace\recorder\capture.py:195) (258 samples, 5.59%)</title><rect x="45.3876%" y="212" width="5.5868%" height="15" fill="rgb(235,201,11)" fg:x="2096" fg:w="258"/><text x="45.6376%" y="222.50">_sequen..</text></g><g><title>_capture (chronotrace\recorder\capture.py:158) (227 samples, 4.92%)</title><rect x="46.0589%" y="228" width="4.9155%" height="15" fill="rgb(207,46,11)" fg:x="2127" fg:w="227"/><text x="46.3089%" y="238.50">_captu..</text></g><g><title>_mapping (chronotrace\recorder\capture.py:210) (111 samples, 2.40%)</title><rect x="48.5708%" y="244" width="2.4036%" height="15" fill="rgb(241,35,35)" fg:x="2243" fg:w="111"/><text x="48.8208%" y="254.50">_m..</text></g><g><title>_tagged (chronotrace\recorder\capture.py:253) (27 samples, 0.58%)</title><rect x="50.3898%" y="260" width="0.5847%" height="15" fill="rgb(243,32,47)" fg:x="2327" fg:w="27"/><text x="50.6398%" y="270.50"></text></g><g><title>_capture_locals (chronotrace\recorder\recorder.py:343) (276 samples, 5.98%)</title><rect x="45.0845%" y="164" width="5.9766%" height="15" fill="rgb(247,202,23)" fg:x="2082" fg:w="276"/><text x="45.3345%" y="174.50">_capture..</text></g><g><title>capture (chronotrace\recorder\capture.py:138) (269 samples, 5.83%)</title><rect x="45.2360%" y="180" width="5.8250%" height="15" fill="rgb(219,102,11)" fg:x="2089" fg:w="269"/><text x="45.4860%" y="190.50">capture..</text></g><g><title>_capture (chronotrace\recorder\capture.py:158) (269 samples, 5.83%)</title><rect x="45.2360%" y="196" width="5.8250%" height="15" fill="rgb(243,110,44)" fg:x="2089" fg:w="269"/><text x="45.4860%" y="206.50">_captur..</text></g><g><title>_capture_locals (chronotrace\recorder\recorder.py:344) (120 samples, 2.60%)</title><rect x="51.0611%" y="164" width="2.5985%" height="15" fill="rgb(222,74,54)" fg:x="2358" fg:w="120"/><text x="51.3111%" y="174.50">_c..</text></g><g><title>add (chronotrace\recorder\values.py:84) (120 samples, 2.60%)</title><rect x="51.0611%" y="180" width="2.5985%" height="15" fill="rgb(216,99,12)" fg:x="2358" fg:w="120"/><text x="51.3111%" y="190.50">ad..</text></g><g><title>digest (chronotrace\recorder\dedup.py:114) (120 samples, 2.60%)</title><rect x="51.0611%" y="196" width="2.5985%" height="15" fill="rgb(226,22,26)" fg:x="2358" fg:w="120"/><text x="51.3111%" y="206.50">di..</text></g><g><title>json_pipeline (workloads.py:135) (402 samples, 8.71%)</title><rect x="44.9978%" y="132" width="8.7051%" height="15" fill="rgb(217,163,10)" fg:x="2078" fg:w="402"/><text x="45.2478%" y="142.50">json_pipelin..</text></g><g><title>_on_line (chronotrace\recorder\recorder.py:303) (400 samples, 8.66%)</title><rect x="45.0411%" y="148" width="8.6618%" height="15" fill="rgb(213,25,53)" fg:x="2080" fg:w="400"/><text x="45.2911%" y="158.50">_on_line (ch..</text></g><g><title>_mapping (chronotrace\recorder\capture.py:205) (5 samples, 0.11%)</title><rect x="53.9194%" y="212" width="0.1083%" height="15" fill="rgb(252,105,26)" fg:x="2490" fg:w="5"/><text x="54.1694%" y="222.50"></text></g><g><title>_capture (chronotrace\recorder\capture.py:157) (6 samples, 0.13%)</title><rect x="54.6773%" y="228" width="0.1299%" height="15" fill="rgb(220,39,43)" fg:x="2525" fg:w="6"/><text x="54.9273%" y="238.50"></text></g><g><title>_mapping (chronotrace\recorder\capture.py:201) (13 samples, 0.28%)</title><rect x="54.9155%" y="244" width="0.2815%" height="15" fill="rgb(229,68,48)" fg:x="2536" fg:w="13"/><text x="55.1655%" y="254.50"></text></g><g><title>_cycle_or_depth (chronotrace\recorder\capture.py:274) (6 samples, 0.13%)</title><rect x="55.0671%" y="260" width="0.1299%" height="15" fill="rgb(252,8,32)" fg:x="2543" fg:w="6"/><text x="55.3171%" y="270.50"></text></g><g><title>_mapping (chronotrace\recorder\capture.py:205) (12 samples, 0.26%)</title><rect x="55.2620%" y="244" width="0.2599%" height="15" fill="rgb(223,20,43)" fg:x="2552" fg:w="12"/><text x="55.5120%" y="254.50"></text></g><g><title>_capture (chronotrace\recorder\capture.py:141) (5 samples, 0.11%)</title><rect x="55.9766%" y="260" width="0.1083%" height="15" fill="rgb(229,81,49)" fg:x="2585" fg:w="5"/><text x="56.2266%" y="270.50"></text></g><g><title>_capture (chronotrace\recorder\capture.py:142) (11 samples, 0.24%)</title><rect x="56.0849%" y="260" width="0.2382%" height="15" fill="rgb(236,28,36)" fg:x="2590" fg:w="11"/><text x="56.3349%" y="270.50"></text></g><g><title>_capture (chronotrace\recorder\capture.py:144) (12 samples, 0.26%)</title><rect x="56.3231%" y="260" width="0.2599%" height="15" fill="rgb(249,185,26)" fg:x="2601" fg:w="12"/><text x="56.5731%" y="270.50"></text></g><g><title>_capture (chronotrace\recorder\capture.py:151) (8 samples, 0.17%)</title><rect x="56.5829%" y="260" width="0.1732%" height="15" fill="rgb(249,174,33)" fg:x="2613" fg:w="8"/><text x="56.8329%" y="270.50"></text></g><g><title>_mapping (chronotrace\recorder\capture.py:206) (75 samples, 1.62%)</title><rect x="55.5219%" y="244" width="1.6241%" height="15" fill="rgb(233,201,37)" fg:x="2564" fg:w="75"/><text x="55.7719%" y="254.50"></text></g><g><title>_capture (chronotrace\recorder\capture.py:154) (13 samples, 0.28%)</title><rect x="56.8644%" y="260" width="0.2815%" height="15" fill="rgb(221,78,26)" fg:x="2626" fg:w="13"/><text x="57.1144%" y="270.50"></text></g><g><title>_mapping (chronotrace\recorder\capture.py:207) (14 samples, 0.30%)</title><rect x="57.1460%" y="244" width="0.3032%" height="15" fill="rgb(250,127,30)" fg:x="2639" fg:w="14"/><text x="57.3960%" y="254.50"></text></g><g><title>of (chronotrace\recorder\identity.py:126) (40 samples, 0.87%)</title><rect x="57.9039%" y="276" width="0.8662%" height="15" fill="rgb(230,49,44)" fg:x="2674" fg:w="40"/><text x="58.1539%" y="286.50"></text></g><g><title>__new__ (chronotrace\recorder\identity.py:81) (24 samples, 0.52%)</title><rect x="58.2503%" y="292" width="0.5197%" height="15" fill="rgb(229,67,23)" fg:x="2690" fg:w="24"/><text x="58.5003%" y="302.50"></text></g><g><title>of (chronotrace\recorder\identity.py:127) (7 samples, 0.15%)</title><rect x="58.7700%" y="276" width="0.1516%" height="15" fill="rgb(249,83,47)" fg:x="2714" fg:w="7"/><text x="59.0200%" y="286.50"></text></g><g><title>_tagged (chronotrace\recorder\capture.py:250) (52 samples, 1.13%)</title><rect x="57.8172%" y="260" width="1.1260%" height="15" fill="rgb(215,43,3)" fg:x="2670" fg:w="52"/><text x="58.0672%" y="270.50"></text></g><g><title>_sequence (chronotrace\recorder\capture.py:195) (245 samples, 5.31%)</title><rect x="54.2010%" y="212" width="5.3053%" height="15" fill="rgb(238,154,13)" fg:x="2503" fg:w="245"/><text x="54.4510%" y="222.50">_seque..</text></g><g><title>_capture (chronotrace\recorder\capture.py:158) (217 samples, 4.70%)</title><rect x="54.8073%" y="228" width="4.6990%" height="15" fill="rgb(219,56,2)" fg:x="2531" fg:w="217"/><text x="55.0573%" y="238.50">_capt..</text></g><g><title>_mapping (chronotrace\recorder\capture.py:210) (94 samples, 2.04%)</title><rect x="57.4708%" y="244" width="2.0355%" height="15" fill="rgb(233,0,4)" fg:x="2654" fg:w="94"/><text x="57.7208%" y="254.50">_..</text></g><g><title>_tagged (chronotrace\recorder\capture.py:253) (26 samples, 0.56%)</title><rect x="58.9433%" y="260" width="0.5630%" height="15" fill="rgb(235,30,7)" fg:x="2722" fg:w="26"/><text x="59.1933%" y="270.50"></text></g><g><title>_capture_locals (chronotrace\recorder\recorder.py:343) (265 samples, 5.74%)</title><rect x="53.7895%" y="164" width="5.7384%" height="15" fill="rgb(250,79,13)" fg:x="2484" fg:w="265"/><text x="54.0395%" y="174.50">_captur..</text></g><g><title>capture (chronotrace\recorder\capture.py:138) (259 samples, 5.61%)</title><rect x="53.9194%" y="180" width="5.6085%" height="15" fill="rgb(211,146,34)" fg:x="2490" fg:w="259"/><text x="54.1694%" y="190.50">capture..</text></g><g><title>_capture (chronotrace\recorder\capture.py:158) (259 samples, 5.61%)</title><rect x="53.9194%" y="196" width="5.6085%" height="15" fill="rgb(228,22,38)" fg:x="2490" fg:w="259"/><text x="54.1694%" y="206.50">_captur..</text></g><g><title>_capture_locals (chronotrace\recorder\recorder.py:344) (107 samples, 2.32%)</title><rect x="59.5279%" y="164" width="2.3170%" height="15" fill="rgb(235,168,5)" fg:x="2749" fg:w="107"/><text x="59.7779%" y="174.50">_..</text></g><g><title>add (chronotrace\recorder\values.py:84) (107 samples, 2.32%)</title><rect x="59.5279%" y="180" width="2.3170%" height="15" fill="rgb(221,155,16)" fg:x="2749" fg:w="107"/><text x="59.7779%" y="190.50">a..</text></g><g><title>digest (chronotrace\recorder\dedup.py:114) (107 samples, 2.32%)</title><rect x="59.5279%" y="196" width="2.3170%" height="15" fill="rgb(215,215,53)" fg:x="2749" fg:w="107"/><text x="59.7779%" y="206.50">d..</text></g><g><title>json_pipeline (workloads.py:136) (377 samples, 8.16%)</title><rect x="53.7029%" y="132" width="8.1637%" height="15" fill="rgb(223,4,10)" fg:x="2480" fg:w="377"/><text x="53.9529%" y="142.50">json_pipeli..</text></g><g><title>_on_line (chronotrace\recorder\recorder.py:303) (375 samples, 8.12%)</title><rect x="53.7462%" y="148" width="8.1204%" height="15" fill="rgb(234,103,6)" fg:x="2482" fg:w="375"/><text x="53.9962%" y="158.50">_on_line (c..</text></g><g><title>_capture (chronotrace\recorder\capture.py:143) (6 samples, 0.13%)</title><rect x="62.6462%" y="228" width="0.1299%" height="15" fill="rgb(227,97,0)" fg:x="2893" fg:w="6"/><text x="62.8962%" y="238.50"></text></g><g><title>_mapping (chronotrace\recorder\capture.py:201) (14 samples, 0.30%)</title><rect x="63.0359%" y="244" width="0.3032%" height="15" fill="rgb(234,150,53)" fg:x="2911" fg:w="14"/><text x="63.2859%" y="254.50"></text></g><g><title>_mapping (chronotrace\recorder\capture.py:205) (14 samples, 0.30%)</title><rect x="63.3391%" y="244" width="0.3032%" height="15" fill="rgb(228,201,54)" fg:x="2925" fg:w="14"/><text x="63.5891%" y="254.50"></text></g><g><title>_capture (chronotrace\recorder\capture.py:144) (21 samples, 0.45%)</title><rect x="64.3569%" y="260" width="0.4547%" height="15" fill="rgb(222,22,37)" fg:x="2972" fg:w="21"/><text x="64.6069%" y="270.50"></text></g><g><title>_capture (chronotrace\recorder\capture.py:151) (8 samples, 0.17%)</title><rect x="64.8116%" y="260" width="0.1732%" height="15" fill="rgb(237,53,32)" fg:x="2993" fg:w="8"/><text x="65.0616%" y="270.50"></text></g><g><title>_capture (chronotrace\recorder\capture.py:152) (21 samples, 0.45%)</title><rect x="64.9848%" y="260" width="0.4547%" height="15" fill="rgb(233,25,53)" fg:x="3001" fg:w="21"/><text x="65.2348%" y="270.50"></text></g><g><title>_mapping (chronotrace\recorder\capture.py:206) (103 samples, 2.23%)</title><rect x="63.6423%" y="244" width="2.2304%" height="15" fill="rgb(210,40,34)" fg:x="2939" fg:w="103"/><text x="63.8923%" y="254.50">_..</text></g><g><title>_capture (chronotrace\recorder\capture.py:154) (17 samples, 0.37%)</title><rect x="65.5045%" y="260" width="0.3681%" height="15" fill="rgb(241,220,44)" fg:x="3025" fg:w="17"/><text x="65.7545%" y="270.50"></text></g><g><title>_mapping (chronotrace\recorder\capture.py:207) (14 samples, 0.30%)</title><rect x="65.8727%" y="244" width="0.3032%" height="15" fill="rgb(235,28,35)" fg:x="3042" fg:w="14"/><text x="66.1227%" y="254.50"></text></g><g><title>of (chronotrace\recorder\identity.py:126) (61 samples, 1.32%)</title><rect x="66.8688%" y="276" width="1.3209%" height="15" fill="rgb(210,56,17)" fg:x="3088" fg:w="61"/><text x="67.1188%" y="286.50"></text></g><g><title>__new__ (chronotrace\recorder\identity.py:81) (34 samples, 0.74%)</title><rect x="67.4534%" y="292" width="0.7362%" height="15" fill="rgb(224,130,29)" fg:x="3115" fg:w="34"/><text x="67.7034%" y="302.50"></text></g><g><title>_tagged (chronotrace\recorder\capture.py:250) (76 samples, 1.65%)</title><rect x="66.7172%" y="260" width="1.6457%" height="15" fill="rgb(235,212,8)" fg:x="3081" fg:w="76"/><text x="66.9672%" y="270.50"></text></g><g><title>of (chronotrace\recorder\identity.py:127) (8 samples, 0.17%)</title><rect x="68.1897%" y="276" width="0.1732%" height="15" fill="rgb(223,33,50)" fg:x="3149" fg:w="8"/><text x="68.4397%" y="286.50"></text></g><g><title>_sequence (chronotrace\recorder\capture.py:195) (308 samples, 6.67%)</title><rect x="62.4513%" y="212" width="6.6696%" height="15" fill="rgb(219,149,13)" fg:x="2884" fg:w="308"/><text x="62.7013%" y="222.50">_sequence..</text></g><g><title>_capture (chronotrace\recorder\capture.py:158) (282 samples, 6.11%)</title><rect x="63.0143%" y="228" width="6.1065%" height="15" fill="rgb(250,156,29)" fg:x="2910" fg:w="282"/><text x="63.2643%" y="238.50">_capture..</text></g><g><title>_mapping (chronotrace\recorder\capture.py:210) (132 samples, 2.86%)</title><rect x="66.2625%" y="244" width="2.8584%" height="15" fill="rgb(216,193,19)" fg:x="3060" fg:w="132"/><text x="66.5125%" y="254.50">_m..</text></g><g><title>_tagged (chronotrace\recorder\capture.py:253) (33 samples, 0.71%)</title><rect x="68.4062%" y="260" width="0.7146%" height="15" fill="rgb(216,135,14)" fg:x="3159" fg:w="33"/><text x="68.6562%" y="270.50"></text></g><g><title>_capture_locals (chronotrace\recorder\recorder.py:343) (332 samples, 7.19%)</title><rect x="62.0182%" y="164" width="7.1893%" height="15" fill="rgb(241,47,5)" fg:x="2864" fg:w="332"/><text x="62.2682%" y="174.50">_capture_l..</text></g><g><title>capture (chronotrace\recorder\capture.py:138) (315 samples, 6.82%)</title><rect x="62.3863%" y="180" width="6.8211%" height="15" fill="rgb(233,42,35)" fg:x="2881" fg:w="315"/><text x="62.6363%" y="190.50">capture (..</text></g><g><title>_capture (chronotrace\recorder\capture.py:158) (315 samples, 6.82%)</title><rect x="62.3863%" y="196" width="6.8211%" height="15" fill="rgb(231,13,6)" fg:x="2881" fg:w="315"/><text x="62.6363%" y="206.50">_capture ..</text></g><g><title>json_pipeline (workloads.py:137) (431 samples, 9.33%)</title><rect x="61.8666%" y="132" width="9.3330%" height="15" fill="rgb(207,181,40)" fg:x="2857" fg:w="431"/><text x="62.1166%" y="142.50">json_pipeline..</text></g><g><title>_on_line (chronotrace\recorder\recorder.py:303) (425 samples, 9.20%)</title><rect x="61.9965%" y="148" width="9.2031%" height="15" fill="rgb(254,173,49)" fg:x="2863" fg:w="425"/><text x="62.2465%" y="158.50">_on_line (chr..</text></g><g><title>_capture_locals (chronotrace\recorder\recorder.py:344) (92 samples, 1.99%)</title><rect x="69.2074%" y="164" width="1.9922%" height="15" fill="rgb(221,1,38)" fg:x="3196" fg:w="92"/><text x="69.4574%" y="174.50">_..</text></g><g><title>add (chronotrace\recorder\values.py:84) (92 samples, 1.99%)</title><rect x="69.2074%" y="180" width="1.9922%" height="15" fill="rgb(206,124,46)" fg:x="3196" fg:w="92"/><text x="69.4574%" y="190.50">a..</text></g><g><title>digest (chronotrace\recorder\dedup.py:114) (92 samples, 1.99%)</title><rect x="69.2074%" y="196" width="1.9922%" height="15" fill="rgb(249,21,11)" fg:x="3196" fg:w="92"/><text x="69.4574%" y="206.50">d..</text></g><g><title>_capture (chronotrace\recorder\capture.py:152) (5 samples, 0.11%)</title><rect x="71.9792%" y="228" width="0.1083%" height="15" fill="rgb(222,201,40)" fg:x="3324" fg:w="5"/><text x="72.2292%" y="238.50"></text></g><g><title>_cycle_or_depth (chronotrace\recorder\capture.py:269) (6 samples, 0.13%)</title><rect x="72.1308%" y="260" width="0.1299%" height="15" fill="rgb(235,61,29)" fg:x="3331" fg:w="6"/><text x="72.3808%" y="270.50"></text></g><g><title>_mapping (chronotrace\recorder\capture.py:201) (16 samples, 0.35%)</title><rect x="72.1308%" y="244" width="0.3465%" height="15" fill="rgb(219,207,3)" fg:x="3331" fg:w="16"/><text x="72.3808%" y="254.50"></text></g><g><title>_capture (chronotrace\recorder\capture.py:142) (6 samples, 0.13%)</title><rect x="72.9104%" y="260" width="0.1299%" height="15" fill="rgb(222,56,46)" fg:x="3367" fg:w="6"/><text x="73.1604%" y="270.50"></text></g><g><title>_capture (chronotrace\recorder\capture.py:144) (8 samples, 0.17%)</title><rect x="73.0619%" y="260" width="0.1732%" height="15" fill="rgb(239,76,54)" fg:x="3374" fg:w="8"/><text x="73.3119%" y="270.50"></text></g><g><title>_capture (chronotrace\recorder\capture.py:152) (11 samples, 0.24%)</title><rect x="73.2785%" y="260" width="0.2382%" height="15" fill="rgb(231,124,27)" fg:x="3384" fg:w="11"/><text x="73.5285%" y="270.50"></text></g><g><title>_capture (chronotrace\recorder\capture.py:154) (7 samples, 0.15%)</title><rect x="73.5167%" y="260" width="0.1516%" height="15" fill="rgb(249,195,6)" fg:x="3395" fg:w="7"/><text x="73.7667%" y="270.50"></text></g><g><title>_mapping (chronotrace\recorder\capture.py:206) (55 samples, 1.19%)</title><rect x="72.4989%" y="244" width="1.1910%" height="15" fill="rgb(237,174,47)" fg:x="3348" fg:w="55"/><text x="72.7489%" y="254.50"></text></g><g><title>_mapping (chronotrace\recorder\capture.py:207) (17 samples, 0.37%)</title><rect x="73.6899%" y="244" width="0.3681%" height="15" fill="rgb(206,201,31)" fg:x="3403" fg:w="17"/><text x="73.9399%" y="254.50"></text></g><g><title>_tagged (chronotrace\recorder\capture.py:246) (5 samples, 0.11%)</title><rect x="74.3179%" y="260" width="0.1083%" height="15" fill="rgb(231,57,52)" fg:x="3432" fg:w="5"/><text x="74.5679%" y="270.50"></text></g><g><title>of (chronotrace\recorder\identity.py:126) (41 samples, 0.89%)</title><rect x="74.6427%" y="276" width="0.8878%" height="15" fill="rgb(248,177,22)" fg:x="3447" fg:w="41"/><text x="74.8927%" y="286.50"></text></g><g><title>__new__ (chronotrace\recorder\identity.py:81) (23 samples, 0.50%)</title><rect x="75.0325%" y="292" width="0.4981%" height="15" fill="rgb(215,211,37)" fg:x="3465" fg:w="23"/><text x="75.2825%" y="302.50"></text></g><g><title>of (chronotrace\recorder\identity.py:127) (12 samples, 0.26%)</title><rect x="75.5305%" y="276" width="0.2599%" height="15" fill="rgb(241,128,51)" fg:x="3488" fg:w="12"/><text x="75.7805%" y="286.50"></text></g><g><title>_tagged (chronotrace\recorder\capture.py:250) (67 samples, 1.45%)</title><rect x="74.4262%" y="260" width="1.4508%" height="15" fill="rgb(227,165,31)" fg:x="3437" fg:w="67"/><text x="74.6762%" y="270.50"></text></g><g><title>_sequence (chronotrace\recorder\capture.py:195) (216 samples, 4.68%)</title><rect x="71.7627%" y="212" width="4.6773%" height="15" fill="rgb(228,167,24)" fg:x="3314" fg:w="216"/><text x="72.0127%" y="222.50">_sequ..</text></g><g><title>_capture (chronotrace\recorder\capture.py:158) (200 samples, 4.33%)</title><rect x="72.1091%" y="228" width="4.3309%" height="15" fill="rgb(228,143,12)" fg:x="3330" fg:w="200"/><text x="72.3591%" y="238.50">_capt..</text></g><g><title>_mapping (chronotrace\recorder\capture.py:210) (106 samples, 2.30%)</title><rect x="74.1447%" y="244" width="2.2954%" height="15" fill="rgb(249,149,8)" fg:x="3424" fg:w="106"/><text x="74.3947%" y="254.50">_..</text></g><g><title>_tagged (chronotrace\recorder\capture.py:253) (26 samples, 0.56%)</title><rect x="75.8770%" y="260" width="0.5630%" height="15" fill="rgb(243,35,44)" fg:x="3504" fg:w="26"/><text x="76.1270%" y="270.50"></text></g><g><title>_capture_locals (chronotrace\recorder\recorder.py:343) (236 samples, 5.11%)</title><rect x="71.3729%" y="164" width="5.1104%" height="15" fill="rgb(246,89,9)" fg:x="3296" fg:w="236"/><text x="71.6229%" y="174.50">_captu..</text></g><g><title>capture (chronotrace\recorder\capture.py:138) (225 samples, 4.87%)</title><rect x="71.6111%" y="180" width="4.8722%" height="15" fill="rgb(233,213,13)" fg:x="3307" fg:w="225"/><text x="71.8611%" y="190.50">captur..</text></g><g><title>_capture (chronotrace\recorder\capture.py:158) (224 samples, 4.85%)</title><rect x="71.6327%" y="196" width="4.8506%" height="15" fill="rgb(233,141,41)" fg:x="3308" fg:w="224"/><text x="71.8827%" y="206.50">_captu..</text></g><g><title>add (chronotrace\recorder\values.py:84) (106 samples, 2.30%)</title><rect x="76.4833%" y="180" width="2.2954%" height="15" fill="rgb(239,167,4)" fg:x="3532" fg:w="106"/><text x="76.7333%" y="190.50">a..</text></g><g><title>digest (chronotrace\recorder\dedup.py:114) (106 samples, 2.30%)</title><rect x="76.4833%" y="196" width="2.2954%" height="15" fill="rgb(209,217,16)" fg:x="3532" fg:w="106"/><text x="76.7333%" y="206.50">d..</text></g><g><title>_capture_locals (chronotrace\recorder\recorder.py:344) (107 samples, 2.32%)</title><rect x="76.4833%" y="164" width="2.3170%" height="15" fill="rgb(219,88,35)" fg:x="3532" fg:w="107"/><text x="76.7333%" y="174.50">_..</text></g><g><title>json_pipeline (workloads.py:138) (352 samples, 7.62%)</title><rect x="71.1997%" y="132" width="7.6223%" height="15" fill="rgb(220,193,23)" fg:x="3288" fg:w="352"/><text x="71.4497%" y="142.50">json_pipel..</text></g><g><title>_on_line (chronotrace\recorder\recorder.py:303) (348 samples, 7.54%)</title><rect x="71.2863%" y="148" width="7.5357%" height="15" fill="rgb(230,90,52)" fg:x="3292" fg:w="348"/><text x="71.5363%" y="158.50">_on_line (..</text></g><g><title>_capture_locals (chronotrace\recorder\recorder.py:340) (5 samples, 0.11%)</title><rect x="78.9736%" y="164" width="0.1083%" height="15" fill="rgb(252,106,19)" fg:x="3647" fg:w="5"/><text x="79.2236%" y="174.50"></text></g><g><title>should_redact (chronotrace\recorder\redact.py:109) (5 samples, 0.11%)</title><rect x="78.9736%" y="180" width="0.1083%" height="15" fill="rgb(206,74,20)" fg:x="3647" fg:w="5"/><text x="79.2236%" y="190.50"></text></g><g><title>capture (chronotrace\recorder\capture.py:137) (15 samples, 0.32%)</title><rect x="79.4067%" y="180" width="0.3248%" height="15" fill="rgb(230,138,44)" fg:x="3667" fg:w="15"/><text x="79.6567%" y="190.50"></text></g><g><title>_mapping (chronotrace\recorder\capture.py:206) (5 samples, 0.11%)</title><rect x="79.7748%" y="212" width="0.1083%" height="15" fill="rgb(235,182,43)" fg:x="3684" fg:w="5"/><text x="80.0248%" y="222.50"></text></g><g><title>_capture (chronotrace\recorder\capture.py:142) (8 samples, 0.17%)</title><rect x="80.5977%" y="228" width="0.1732%" height="15" fill="rgb(242,16,51)" fg:x="3722" fg:w="8"/><text x="80.8477%" y="238.50"></text></g><g><title>_capture (chronotrace\recorder\capture.py:143) (7 samples, 0.15%)</title><rect x="80.7709%" y="228" width="0.1516%" height="15" fill="rgb(248,9,4)" fg:x="3730" fg:w="7"/><text x="81.0209%" y="238.50"></text></g><g><title>_capture (chronotrace\recorder\capture.py:157) (9 samples, 0.19%)</title><rect x="81.0307%" y="228" width="0.1949%" height="15" fill="rgb(210,31,22)" fg:x="3742" fg:w="9"/><text x="81.2807%" y="238.50"></text></g><g><title>_handler_for (chronotrace\recorder\capture.py:384) (5 samples, 0.11%)</title><rect x="81.1174%" y="244" width="0.1083%" height="15" fill="rgb(239,54,39)" fg:x="3746" fg:w="5"/><text x="81.3674%" y="254.50"></text></g><g><title>_cycle_or_depth (chronotrace\recorder\capture.py:269) (5 samples, 0.11%)</title><rect x="81.4638%" y="260" width="0.1083%" height="15" fill="rgb(230,99,41)" fg:x="3762" fg:w="5"/><text x="81.7138%" y="270.50"></text></g><g><title>_cycle_or_depth (chronotrace\recorder\capture.py:271) (17 samples, 0.37%)</title><rect x="81.6154%" y="260" width="0.3681%" height="15" fill="rgb(253,106,12)" fg:x="3769" fg:w="17"/><text x="81.8654%" y="270.50"></text></g><g><title>_cycle_or_depth (chronotrace\recorder\capture.py:272) (5 samples, 0.11%)</title><rect x="81.9835%" y="260" width="0.1083%" height="15" fill="rgb(213,46,41)" fg:x="3786" fg:w="5"/><text x="82.2335%" y="270.50"></text></g><g><title>_mapping (chronotrace\recorder\capture.py:201) (43 samples, 0.93%)</title><rect x="81.3556%" y="244" width="0.9311%" height="15" fill="rgb(215,133,35)" fg:x="3757" fg:w="43"/><text x="81.6056%" y="254.50"></text></g><g><title>_cycle_or_depth (chronotrace\recorder\capture.py:274) (9 samples, 0.19%)</title><rect x="82.0918%" y="260" width="0.1949%" height="15" fill="rgb(213,28,5)" fg:x="3791" fg:w="9"/><text x="82.3418%" y="270.50"></text></g><g><title>_mapping (chronotrace\recorder\capture.py:205) (25 samples, 0.54%)</title><rect x="82.3084%" y="244" width="0.5414%" height="15" fill="rgb(215,77,49)" fg:x="3801" fg:w="25"/><text x="82.5584%" y="254.50"></text></g><g><title>_capture (chronotrace\recorder\capture.py:141) (7 samples, 0.15%)</title><rect x="84.2139%" y="260" width="0.1516%" height="15" fill="rgb(248,100,22)" fg:x="3889" fg:w="7"/><text x="84.4639%" y="270.50"></text></g><g><title>_capture (chronotrace\recorder\capture.py:142) (13 samples, 0.28%)</title><rect x="84.3655%" y="260" width="0.2815%" height="15" fill="rgb(208,67,9)" fg:x="3896" fg:w="13"/><text x="84.6155%" y="270.50"></text></g><g><title>_capture (chronotrace\recorder\capture.py:144) (12 samples, 0.26%)</title><rect x="84.6687%" y="260" width="0.2599%" height="15" fill="rgb(219,133,21)" fg:x="3910" fg:w="12"/><text x="84.9187%" y="270.50"></text></g><g><title>_capture (chronotrace\recorder\capture.py:152) (48 samples, 1.04%)</title><rect x="84.9718%" y="260" width="1.0394%" height="15" fill="rgb(246,46,29)" fg:x="3924" fg:w="48"/><text x="85.2218%" y="270.50"></text></g><g><title>_capture (chronotrace\recorder\capture.py:154) (24 samples, 0.52%)</title><rect x="86.0546%" y="260" width="0.5197%" height="15" fill="rgb(246,185,52)" fg:x="3974" fg:w="24"/><text x="86.3046%" y="270.50"></text></g><g><title>_mapping (chronotrace\recorder\capture.py:206) (173 samples, 3.75%)</title><rect x="82.8497%" y="244" width="3.7462%" height="15" fill="rgb(252,136,11)" fg:x="3826" fg:w="173"/><text x="83.0997%" y="254.50">_map..</text></g><g><title>_mapping (chronotrace\recorder\capture.py:207) (42 samples, 0.91%)</title><rect x="86.5959%" y="244" width="0.9095%" height="15" fill="rgb(219,138,53)" fg:x="3999" fg:w="42"/><text x="86.8459%" y="254.50"></text></g><g><title>_mapping (chronotrace\recorder\capture.py:209) (5 samples, 0.11%)</title><rect x="87.5054%" y="244" width="0.1083%" height="15" fill="rgb(211,51,23)" fg:x="4041" fg:w="5"/><text x="87.7554%" y="254.50"></text></g><g><title>of (chronotrace\recorder\identity.py:121) (5 samples, 0.11%)</title><rect x="88.8047%" y="276" width="0.1083%" height="15" fill="rgb(247,221,28)" fg:x="4101" fg:w="5"/><text x="89.0547%" y="286.50"></text></g><g><title>of (chronotrace\recorder\identity.py:126) (96 samples, 2.08%)</title><rect x="88.9346%" y="276" width="2.0788%" height="15" fill="rgb(251,222,45)" fg:x="4107" fg:w="96"/><text x="89.1846%" y="286.50">o..</text></g><g><title>__new__ (chronotrace\recorder\identity.py:81) (64 samples, 1.39%)</title><rect x="89.6275%" y="292" width="1.3859%" height="15" fill="rgb(217,162,53)" fg:x="4139" fg:w="64"/><text x="89.8775%" y="302.50"></text></g><g><title>of (chronotrace\recorder\identity.py:127) (11 samples, 0.24%)</title><rect x="91.0134%" y="276" width="0.2382%" height="15" fill="rgb(229,93,14)" fg:x="4203" fg:w="11"/><text x="91.2634%" y="286.50"></text></g><g><title>_tagged (chronotrace\recorder\capture.py:250) (125 samples, 2.71%)</title><rect x="88.5665%" y="260" width="2.7068%" height="15" fill="rgb(209,67,49)" fg:x="4090" fg:w="125"/><text x="88.8165%" y="270.50">_t..</text></g><g><title>_tagged (chronotrace\recorder\capture.py:253) (87 samples, 1.88%)</title><rect x="91.2733%" y="260" width="1.8839%" height="15" fill="rgb(213,87,29)" fg:x="4215" fg:w="87"/><text x="91.5233%" y="270.50">_..</text></g><g><title>_sequence (chronotrace\recorder\capture.py:195) (603 samples, 13.06%)</title><rect x="80.1429%" y="212" width="13.0576%" height="15" fill="rgb(205,151,52)" fg:x="3701" fg:w="603"/><text x="80.3929%" y="222.50">_sequence (chronotra..</text></g><g><title>_capture (chronotrace\recorder\capture.py:158) (553 samples, 11.97%)</title><rect x="81.2256%" y="228" width="11.9749%" height="15" fill="rgb(253,215,39)" fg:x="3751" fg:w="553"/><text x="81.4756%" y="238.50">_capture (chronotr..</text></g><g><title>_mapping (chronotrace\recorder\capture.py:210) (258 samples, 5.59%)</title><rect x="87.6137%" y="244" width="5.5868%" height="15" fill="rgb(221,220,41)" fg:x="4046" fg:w="258"/><text x="87.8637%" y="254.50">_mappin..</text></g><g><title>_capture_locals (chronotrace\recorder\recorder.py:343) (657 samples, 14.23%)</title><rect x="79.0819%" y="164" width="14.2269%" height="15" fill="rgb(218,133,21)" fg:x="3652" fg:w="657"/><text x="79.3319%" y="174.50">_capture_locals (chron..</text></g><g><title>capture (chronotrace\recorder\capture.py:138) (627 samples, 13.58%)</title><rect x="79.7315%" y="180" width="13.5773%" height="15" fill="rgb(221,193,43)" fg:x="3682" fg:w="627"/><text x="79.9815%" y="190.50">capture (chronotrace\..</text></g><g><title>_capture (chronotrace\recorder\capture.py:158) (626 samples, 13.56%)</title><rect x="79.7531%" y="196" width="13.5557%" height="15" fill="rgb(240,128,52)" fg:x="3683" fg:w="626"/><text x="80.0031%" y="206.50">_capture (chronotrac..</text></g><g><title>add (chronotrace\recorder\values.py:84) (274 samples, 5.93%)</title><rect x="93.3304%" y="180" width="5.9333%" height="15" fill="rgb(253,114,12)" fg:x="4310" fg:w="274"/><text x="93.5804%" y="190.50">add (chr..</text></g><g><title>digest (chronotrace\recorder\dedup.py:114) (274 samples, 5.93%)</title><rect x="93.3304%" y="196" width="5.9333%" height="15" fill="rgb(215,223,47)" fg:x="4310" fg:w="274"/><text x="93.5804%" y="206.50">digest (..</text></g><g><title>add (chronotrace\recorder\values.py:85) (6 samples, 0.13%)</title><rect x="99.2638%" y="180" width="0.1299%" height="15" fill="rgb(248,225,23)" fg:x="4584" fg:w="6"/><text x="99.5138%" y="190.50"></text></g><g><title>_capture_locals (chronotrace\recorder\recorder.py:344) (282 samples, 6.11%)</title><rect x="93.3088%" y="164" width="6.1065%" height="15" fill="rgb(250,108,0)" fg:x="4309" fg:w="282"/><text x="93.5588%" y="174.50">_capture..</text></g><g><title>json_pipeline (workloads.py:143) (952 samples, 20.61%)</title><rect x="78.8220%" y="132" width="20.6150%" height="15" fill="rgb(228,208,7)" fg:x="3640" fg:w="952"/><text x="79.0720%" y="142.50">json_pipeline (workloads.py:143)</text></g><g><title>_on_line (chronotrace\recorder\recorder.py:303) (948 samples, 20.53%)</title><rect x="78.9086%" y="148" width="20.5284%" height="15" fill="rgb(244,45,10)" fg:x="3644" fg:w="948"/><text x="79.1586%" y="158.50">_on_line (chronotrace\recorder\r..</text></g><g><title>&lt;module&gt; (profile_recorder.py:194) (4,593 samples, 99.46%)</title><rect x="0.0000%" y="68" width="99.4586%" height="15" fill="rgb(207,125,25)" fg:x="0" fg:w="4593"/><text x="0.2500%" y="78.50">&lt;module&gt; (profile_recorder.py:194)</text></g><g><title>main (profile_recorder.py:190) (4,588 samples, 99.35%)</title><rect x="0.1083%" y="84" width="99.3504%" height="15" fill="rgb(210,195,18)" fg:x="5" fg:w="4588"/><text x="0.3583%" y="94.50">main (profile_recorder.py:190)</text></g><g><title>cmd_record (profile_recorder.py:57) (4,588 samples, 99.35%)</title><rect x="0.1083%" y="100" width="99.3504%" height="15" fill="rgb(249,80,12)" fg:x="5" fg:w="4588"/><text x="0.3583%" y="110.50">cmd_record (profile_recorder.py:57)</text></g><g><title>_record_once (profile_recorder.py:50) (4,574 samples, 99.05%)</title><rect x="0.4114%" y="116" width="99.0472%" height="15" fill="rgb(221,65,9)" fg:x="19" fg:w="4574"/><text x="0.6614%" y="126.50">_record_once (profile_recorder.py:50)</text></g><g><title>&lt;module&gt; (profile_recorder.py:26) (5 samples, 0.11%)</title><rect x="99.5669%" y="68" width="0.1083%" height="15" fill="rgb(235,49,36)" fg:x="4598" fg:w="5"/><text x="99.8169%" y="78.50"></text></g><g><title>_find_and_load (&lt;frozen importlib._bootstrap&gt;:1371) (5 samples, 0.11%)</title><rect x="99.5669%" y="84" width="0.1083%" height="15" fill="rgb(225,32,20)" fg:x="4598" fg:w="5"/><text x="99.8169%" y="94.50"></text></g><g><title>_find_and_load_unlocked (&lt;frozen importlib._bootstrap&gt;:1342) (5 samples, 0.11%)</title><rect x="99.5669%" y="100" width="0.1083%" height="15" fill="rgb(215,141,46)" fg:x="4598" fg:w="5"/><text x="99.8169%" y="110.50"></text></g><g><title>_load_unlocked (&lt;frozen importlib._bootstrap&gt;:938) (5 samples, 0.11%)</title><rect x="99.5669%" y="116" width="0.1083%" height="15" fill="rgb(250,160,47)" fg:x="4598" fg:w="5"/><text x="99.8169%" y="126.50"></text></g><g><title>exec_module (&lt;frozen importlib._bootstrap_external&gt;:759) (5 samples, 0.11%)</title><rect x="99.5669%" y="132" width="0.1083%" height="15" fill="rgb(216,222,40)" fg:x="4598" fg:w="5"/><text x="99.8169%" y="142.50"></text></g><g><title>_call_with_frames_removed (&lt;frozen importlib._bootstrap&gt;:491) (5 samples, 0.11%)</title><rect x="99.5669%" y="148" width="0.1083%" height="15" fill="rgb(234,217,39)" fg:x="4598" fg:w="5"/><text x="99.8169%" y="158.50"></text></g><g><title>&lt;module&gt; (pstats.py:31) (5 samples, 0.11%)</title><rect x="99.5669%" y="164" width="0.1083%" height="15" fill="rgb(207,178,40)" fg:x="4598" fg:w="5"/><text x="99.8169%" y="174.50"></text></g><g><title>_find_and_load (&lt;frozen importlib._bootstrap&gt;:1371) (5 samples, 0.11%)</title><rect x="99.5669%" y="180" width="0.1083%" height="15" fill="rgb(221,136,13)" fg:x="4598" fg:w="5"/><text x="99.8169%" y="190.50"></text></g><g><title>_find_and_load_unlocked (&lt;frozen importlib._bootstrap&gt;:1342) (5 samples, 0.11%)</title><rect x="99.5669%" y="196" width="0.1083%" height="15" fill="rgb(249,199,10)" fg:x="4598" fg:w="5"/><text x="99.8169%" y="206.50"></text></g><g><title>_load_unlocked (&lt;frozen importlib._bootstrap&gt;:938) (5 samples, 0.11%)</title><rect x="99.5669%" y="212" width="0.1083%" height="15" fill="rgb(249,222,13)" fg:x="4598" fg:w="5"/><text x="99.8169%" y="222.50"></text></g><g><title>exec_module (&lt;frozen importlib._bootstrap_external&gt;:759) (5 samples, 0.11%)</title><rect x="99.5669%" y="228" width="0.1083%" height="15" fill="rgb(244,185,38)" fg:x="4598" fg:w="5"/><text x="99.8169%" y="238.50"></text></g><g><title>_call_with_frames_removed (&lt;frozen importlib._bootstrap&gt;:491) (5 samples, 0.11%)</title><rect x="99.5669%" y="244" width="0.1083%" height="15" fill="rgb(236,202,9)" fg:x="4598" fg:w="5"/><text x="99.8169%" y="254.50"></text></g><g><title>&lt;module&gt; (dataclasses.py:5) (5 samples, 0.11%)</title><rect x="99.5669%" y="260" width="0.1083%" height="15" fill="rgb(250,229,37)" fg:x="4598" fg:w="5"/><text x="99.8169%" y="270.50"></text></g><g><title>_find_and_load (&lt;frozen importlib._bootstrap&gt;:1371) (5 samples, 0.11%)</title><rect x="99.5669%" y="276" width="0.1083%" height="15" fill="rgb(206,174,23)" fg:x="4598" fg:w="5"/><text x="99.8169%" y="286.50"></text></g><g><title>_find_and_load_unlocked (&lt;frozen importlib._bootstrap&gt;:1342) (5 samples, 0.11%)</title><rect x="99.5669%" y="292" width="0.1083%" height="15" fill="rgb(211,33,43)" fg:x="4598" fg:w="5"/><text x="99.8169%" y="302.50"></text></g><g><title>_load_unlocked (&lt;frozen importlib._bootstrap&gt;:938) (5 samples, 0.11%)</title><rect x="99.5669%" y="308" width="0.1083%" height="15" fill="rgb(245,58,50)" fg:x="4598" fg:w="5"/><text x="99.8169%" y="318.50"></text></g><g><title>&lt;module&gt; (profile_recorder.py:39) (5 samples, 0.11%)</title><rect x="99.8051%" y="68" width="0.1083%" height="15" fill="rgb(244,68,36)" fg:x="4609" fg:w="5"/><text x="100.0551%" y="78.50"></text></g><g><title>_find_and_load (&lt;frozen importlib._bootstrap&gt;:1371) (5 samples, 0.11%)</title><rect x="99.8051%" y="84" width="0.1083%" height="15" fill="rgb(232,229,15)" fg:x="4609" fg:w="5"/><text x="100.0551%" y="94.50"></text></g><g><title>_find_and_load_unlocked (&lt;frozen importlib._bootstrap&gt;:1342) (5 samples, 0.11%)</title><rect x="99.8051%" y="100" width="0.1083%" height="15" fill="rgb(254,30,23)" fg:x="4609" fg:w="5"/><text x="100.0551%" y="110.50"></text></g><g><title>_load_unlocked (&lt;frozen importlib._bootstrap&gt;:938) (5 samples, 0.11%)</title><rect x="99.8051%" y="116" width="0.1083%" height="15" fill="rgb(235,160,14)" fg:x="4609" fg:w="5"/><text x="100.0551%" y="126.50"></text></g><g><title>exec_module (&lt;frozen importlib._bootstrap_external&gt;:759) (5 samples, 0.11%)</title><rect x="99.8051%" y="132" width="0.1083%" height="15" fill="rgb(212,155,44)" fg:x="4609" fg:w="5"/><text x="100.0551%" y="142.50"></text></g><g><title>_call_with_frames_removed (&lt;frozen importlib._bootstrap&gt;:491) (5 samples, 0.11%)</title><rect x="99.8051%" y="148" width="0.1083%" height="15" fill="rgb(226,2,50)" fg:x="4609" fg:w="5"/><text x="100.0551%" y="158.50"></text></g><g><title>all (4,618 samples, 100%)</title><rect x="0.0000%" y="52" width="100.0000%" height="15" fill="rgb(234,177,6)" fg:x="0" fg:w="4618"/><text x="0.2500%" y="62.50"></text></g></svg></svg>

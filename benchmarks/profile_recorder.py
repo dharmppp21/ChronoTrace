@@ -62,11 +62,13 @@ def cmd_flamegraphs(args: argparse.Namespace) -> int:
     """py-spy over each workload -> a flamegraph SVG.
 
     Sampling does not distort the per-line callbacks the way cProfile would, which is why it is
-    the primary tool.
+    the primary tool. `--subdir after` writes into flamegraphs/after/ so a post-optimisation set
+    sits beside the day-40 `before` set without overwriting it.
     """
-    _FLAME_DIR.mkdir(parents=True, exist_ok=True)
+    out_dir = _FLAME_DIR / args.subdir if args.subdir else _FLAME_DIR
+    out_dir.mkdir(parents=True, exist_ok=True)
     for name in _ORDER:
-        out = _FLAME_DIR / f"{name}.svg"
+        out = out_dir / f"{name}.svg"
         print(f"py-spy -> {out.name} ...", flush=True)
         cmd = [
             "py-spy",
@@ -182,6 +184,8 @@ def main() -> int:
             sp.add_argument("workload", choices=_ORDER)
         if name in ("record", "flamegraphs"):
             sp.add_argument("--repeat", type=int, default=1)
+        if name == "flamegraphs":
+            sp.add_argument("--subdir", default="", help="e.g. 'after' -> flamegraphs/after/")
     args = parser.parse_args()
     return _DISPATCH[args.cmd](args)
 
