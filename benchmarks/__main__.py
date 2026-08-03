@@ -110,7 +110,7 @@ def _overhead_table(reps: int, workloads: tuple[str, ...] | None) -> str:
         lines.append(
             f"| {wl} | {bench_overhead.LABELS[r['condition']]} | "
             f"{r['median'] * 1000:.2f} ms | {r['p95'] * 1000:.2f} ms | "
-            f"{'1.0×' if base else f'{r['ratio']:.1f}×'} | {ev} |"
+            f"{'1.0×' if base else f'{r["ratio"]:.1f}×'} | {ev} |"
         )
     return "\n".join(lines)
 
@@ -184,7 +184,7 @@ def _storage_reconstruct() -> str:
             "",
             "Cold random access replays up to one keyframe interval (ADR-0006); the flat "
             "tail confirms the bound holds. The **cached +1 drag** is the interactive "
-            "scrubbing path — ~200× faster — and is the number behind \"instant scrubbing\".",
+            'scrubbing path — ~200× faster — and is the number behind "instant scrubbing".',
         ]
     )
 
@@ -236,8 +236,7 @@ def main() -> int:
         "# Benchmark results",
         "",
         "> Numbers between the generated markers are produced by `python -m benchmarks`.",
-        "> Methodology, fair-baseline rationale and limitations: "
-        "[METHODOLOGY.md](METHODOLOGY.md).",
+        "> Methodology, fair-baseline rationale and limitations: [METHODOLOGY.md](METHODOLOGY.md).",
         "",
         _environment(reps),
         "",
