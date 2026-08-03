@@ -56,3 +56,31 @@ jobs:
           name: hypothesis-examples-py${{ matrix.python-version }}
           path: .hypothesis/examples
           if-no-files-found: ignore
+
+  # A nightly reproducibility guard, NOT a performance trend. GitHub-hosted runners are
+  # ephemeral and their timing variance swamps the signal, which would violate the
+  # pinned-environment rule in benchmarks/METHODOLOGY.md -- so this does not chart numbers
+  # across nights. What it does guard: that `python -m benchmarks` still RUNS end to end and
+  # produces RESULTS.md (imports, subprocess protocol, coverage.py baseline, the store and
+  # reconstruct paths), and it archives each night's RESULTS.md as a diffable artifact. A
+  # real trend needs a fixed machine; that is a manual `python -m benchmarks` on one, not CI.
+  benchmark-smoke:
+    name: benchmark smoke (--quick)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+          cache: pip
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+      - name: Regenerate the quick benchmark block
+        run: python -m benchmarks --quick
+      - name: Archive this night's RESULTS.md
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: benchmarks/RESULTS.md
