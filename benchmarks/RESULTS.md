@@ -1,9 +1,100 @@
+<!-- BENCH:GENERATED:START -->
+
 # Benchmark results
 
-Every number the project claims lives here. Re-run with `python benchmarks/<file>.py`.
+> Numbers between the generated markers are produced by `python -m benchmarks`.
+> Methodology, fair-baseline rationale and limitations: [METHODOLOGY.md](METHODOLOGY.md).
 
-Machine: i5-13450HX (10c/16t), 15.7 GB, Windows 11 build 26200, High performance
-power scheme, Python 3.14.3.
+### Environment (auto-captured)
+
+| | |
+|---|---|
+| Machine | Intel64 Family 6 Model 183 Stepping 1, GenuineIntel |
+| Logical CPUs | 16 |
+| OS | Windows-11-10.0.26200-SP0 |
+| Python | 3.14.3 (CPython) |
+| ChronoTrace | 0.1.0.dev0 @ git 712c2d4 |
+| Generated | 2026-08-03 18:56 UTC |
+| Repetitions | 5 (one fresh subprocess per sample) |
+| GC | collected before each timed region, left **enabled** throughout |
+| Warmup | one uninstrumented run per child before timing |
+
+Reproduce: `python -m benchmarks`. The exact CPU/RAM model is named in the curated Environment section below; the row above is what the machine's own `platform` reports, verbatim.
+
+### Recording overhead vs. fair baselines
+
+Each condition does **strictly more work** than the one above it; a ChronoTrace
+row below coverage.py is *not* a per-event speed win (see METHODOLOGY.md). `--sample` is planned (issue #18), not built, so it is not measured.
+
+| Workload | Condition | Median | p95 | vs base | events |
+|---|---|---:|---:|---:|---:|
+| **tight_loop** | baseline (no instrumentation) | 7.67 ms | 7.94 ms | 1.0× | 0 |
+|  | sys.settrace no-op | 61.63 ms | 64.49 ms | 8.0× | 750,005 |
+|  | pdb (never-hit breakpoint) | 970.56 ms | 1036.84 ms | 126.5× | — |
+|  | coverage.py | 9.73 ms | 10.11 ms | 1.3× | — |
+|  | chronotrace (flow only) | 1848.76 ms | 1863.16 ms | 240.9× | 750,005 |
+|  | chronotrace (+value capture) | 22333.92 ms | 23095.59 ms | 2910.3× | 1,350,007 |
+| **fib_recursive** | baseline (no instrumentation) | 4.81 ms | 5.25 ms | 1.0× | 0 |
+|  | sys.settrace no-op | 52.80 ms | 55.28 ms | 11.0× | 600,196 |
+|  | pdb (never-hit breakpoint) | 812.54 ms | 825.82 ms | 168.9× | — |
+|  | coverage.py | 5.29 ms | 5.78 ms | 1.1× | — |
+|  | chronotrace (flow only) | 1515.46 ms | 1593.22 ms | 314.9× | 600,196 |
+|  | chronotrace (+value capture) | 2575.57 ms | 2615.12 ms | 535.2× | 750,245 |
+| **json_pipeline** | baseline (no instrumentation) | 7.27 ms | 7.88 ms | 1.0× | 0 |
+|  | sys.settrace no-op | 23.76 ms | 25.23 ms | 3.3× | 196,975 |
+|  | pdb (never-hit breakpoint) | 277.15 ms | 291.67 ms | 38.1× | — |
+|  | coverage.py | 12.07 ms | 12.34 ms | 1.7× | — |
+|  | chronotrace (flow only) | 44.87 ms | 48.35 ms | 6.2× | 13,212 |
+|  | chronotrace (+value capture) | 12736.50 ms | 13043.73 ms | 1751.5× | 18,015 |
+| **io_bound** | baseline (no instrumentation) | 162.30 ms | 165.67 ms | 1.0× | 0 |
+|  | sys.settrace no-op | 161.10 ms | 163.73 ms | 1.0× | 455 |
+|  | pdb (never-hit breakpoint) | 161.02 ms | 162.71 ms | 1.0× | — |
+|  | coverage.py | 161.71 ms | 168.83 ms | 1.0× | — |
+|  | chronotrace (flow only) | 162.13 ms | 164.82 ms | 1.0× | 455 |
+|  | chronotrace (+value capture) | 166.21 ms | 168.97 ms | 1.0× | 758 |
+
+### Storage & reconstruction
+
+One json_pipeline recording, value capture on, `include=['*']` (a full trace, not the scoped default) so the recording is large enough for the tail to mean something.
+
+| Metric | Value |
+|---|---|
+| Events | 281,002 |
+| Distinct pooled values | 10,626 |
+| `.chrono` size | 1328.1 KiB |
+| Bytes / event | 4.8 |
+| Keyframes | 282 |
+| Cold random reconstruct p50/p95/p99 | 21026 / 42403 / 86506 µs |
+| Cached +1 drag p50/p95/p99 | 111 / 152 / 255 µs |
+
+Cold random access replays up to one keyframe interval (ADR-0006); the flat tail confirms the bound holds. The **cached +1 drag** is the interactive scrubbing path — ~200× faster — and is the number behind "instant scrubbing".
+
+### Detail benches (run individually for the full per-day numbers)
+
+These measure distinct things and are the reproducible source for numbers quoted in ADRs and the curated notes below:
+
+- `bench_events.py` — event model, AoS vs SoA (day 4)
+- `bench_dedup.py` — dedup hit rate & recording-size reduction (day 8)
+- `bench_scope.py` — the DISABLE scoping win (day 9)
+- `bench_compression.py` — columnar+zstd bytes/event, throughput (day 14)
+- `bench_keyframe_interval.py`, `bench_grid.py` — storage knobs (days 15, 18)
+- `bench_delta.py`, `bench_stepping.py` — deltas & backward stepping (days 16, 21)
+- `bench_index.py` — index build rate & size (day 26)
+- `bench_reconstruct.py` — reconstruction tail & value resolve (day 20)
+- `profile_recorder.py` — py-spy flamegraphs & micro-timers (days 40–42)
+
+<!-- BENCH:GENERATED:END -->
+
+---
+
+## Curated per-day notes
+
+Every design-decision number the project claims lives here. Re-run an individual
+bench with `python benchmarks/<file>.py`; regenerate the headline block above with
+`python -m benchmarks`.
+
+**Environment (curated, exact model):** i5-13450HX (10c/16t), 15.7 GB, Windows 11
+build 26200, High performance power scheme, Python 3.14.3.
 
 Spike results live separately: [`spikes/RESULTS-overhead.md`](../spikes/RESULTS-overhead.md)
 (line-observation cost) and [`spikes/RESULTS-capture.md`](../spikes/RESULTS-capture.md)

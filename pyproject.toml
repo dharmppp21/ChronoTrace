@@ -177,9 +177,10 @@ extend-immutable-calls = ["fastapi.Depends", "fastapi.Query"]
 # Benchmarks are measurement scripts, not library code: print IS their output, and
 # the reasoning lives in module docstrings and benchmarks/RESULTS.md rather than on
 # each throwaway variant class. Same rationale as spikes/ below, different lifetime
-# -- these are kept and re-run (day 43 consolidates them), so correctness rules
-# still apply in full.
-"benchmarks/**" = ["T20", "D101", "D102", "D103"]
+# -- these are kept and re-run (day 43 consolidates them into `python -m benchmarks`),
+# so correctness rules still apply in full. RUF001/002 are exempt because the
+# generated tables emit mathematical Unicode on purpose (`×` ratios, `µs`, en dashes).
+"benchmarks/**" = ["T20", "D101", "D102", "D103", "RUF001", "RUF002"]
 
 # Spikes are throwaway by design (see spikes/README.md). They get a lighter
 # standard because their deliverable is a RESULTS-*.md file, not code that
