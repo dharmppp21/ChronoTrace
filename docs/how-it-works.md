@@ -97,14 +97,23 @@ budget of 512 nodes). That last one exists because depth and width limits bound 
 and an ordinary 20×20×20×20×20 nested list measured at **26 seconds and 416 MB for one
 variable on one line**.
 
-### Two things that make it affordable
+### Two things that make it tractable — and one honest limit
 
 **Change detection.** A `VAR_WRITE` is emitted only when a binding's value actually
-changed. Re-stating every local on every line measured at 2,370× overhead.
+changed, so an unchanged *immutable* local costs an identity check, not a re-capture.
+Re-stating every local on every line measured at **2,370×**; change detection removes
+that cost for immutables. But a **mutable** local must be re-captured every line
+regardless — identity cannot prove a list did not mutate in place — which is why
+realistic value-capture overhead is still **~1,500×**
+([benchmarks/RESULTS.md](../benchmarks/RESULTS.md)), not the ~6× an *unsound* identity
+shortcut would report. Value capture is deep inspection, and it is opt-in for exactly
+this reason.
 
 **Content-addressed deduplication.** Identical values are stored once and referenced by
 integer. A loop that appends to a list produces one stored value per distinct state, not
-one per iteration — measured at **−97.9%** on a realistic workload.
+one per iteration — measured at **−97.9%** on a realistic workload. This is a *storage*
+win (bytes on disk), not an overhead win: the value is still captured and hashed before
+dedup can discover it was already seen.
 
 Deduplication is on **content**, never on object identity, and that distinction is a bug
 we deliberately went looking for: a mutable object mutated in place keeps its `id()`, so

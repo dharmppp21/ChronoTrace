@@ -239,36 +239,66 @@ localhost (ADR-0011). Full guide, with keyboard shortcuts, in [`docs/ui.md`](doc
 - **Call tree** — not just the current stack but *every call the program ever made*, coloured by how each ended (returned / **raised** / open); click one that returned 200k events ago and go there.
 - **Query** — forms generated from the engine's query registry; results are hoverable, jump-to-instant links.
 
-## Overhead, measured not boasted
+## Overhead, measured against the tools you already use
 
-i5-13450HX, Windows 11, Python 3.14, medians of 5. Full tables and methodology in
-[`benchmarks/RESULTS.md`](benchmarks/RESULTS.md).
+All numbers ÷ a no-instrumentation baseline, medians of 5, one fresh subprocess per
+sample. i5-13450HX, Windows 11, Python 3.14. Regenerate with `python -m benchmarks`;
+full matrix, p95s and the environment header are in
+[`benchmarks/RESULTS.md`](benchmarks/RESULTS.md), the rules in
+[`benchmarks/METHODOLOGY.md`](benchmarks/METHODOLOGY.md).
 
-| Workload | Control-flow only | With value capture |
-|---|---:|---:|
-| Realistic pipeline (stdlib-heavy) | **6.7×** | ~1,440×* |
-| Tight numeric loop (worst case) | ~102× | ~1,270× |
-| I/O-bound (the control) | 1.0× | 1.0× |
+| Workload | `pdb`¹ | coverage.py² | **ChronoTrace flow**³ | ChronoTrace +capture⁴ |
+|---|---:|---:|---:|---:|
+| Realistic pipeline (stdlib-heavy, scoped) | ~35× | ~1.5× | **~6×** | ~1,500× |
+| Recursive / call-heavy | ~170× | ~1.2× | ~310× | ~550× |
+| Tight numeric loop (worst case) | ~115× | ~1.2× | ~200× | ~2,500× |
+| I/O-bound (the control) | 1.0× | 1.0× | 1.0× | 1.0× |
 
-Content-addressed deduplication cuts recording size by **97.9%** on the realistic
-workload; scope filtering via `DISABLE` cuts realistic control-flow overhead
-**33×**. For honest comparison, `pdb` is widely cited at 50–100×.
+Rounded, because the worst-case (tight-loop) cells allocate 750k+ objects and vary
+±~20% run to run; [`RESULTS.md`](benchmarks/RESULTS.md) carries the exact last-run
+medians and p95s with the environment header.
 
-**Reading these numbers.** Control-flow-only recording — the default — is **6.7×** on realistic
-code, in `pdb`'s tracing range. **Value capture** (every variable's value at every line) is the
-opt-in deep-inspection mode, and it is what costs the four figures; reach for it when you need to
-*see* state, not just flow, and use `--sample` (planned) for hot loops. A native (Rust) rewrite of
-the capturer was profiled and **deliberately declined** — Amdahl caps the win at ~3.6× for a week
-of work plus a permanent build matrix, and changing the asymptotics with sampling beats it; the
-arithmetic is in [ADR-0014](docs/adr/0014-no-native-extension.md).
+**Each column does strictly more work than the one to its left — so this is not a
+like-for-like race, and the table says so rather than hiding it:**
 
-\* Value capture is correct and bounded but not yet fast — it re-serialises each
-changed value. Phase 6 profiled it (day 40, `benchmarks/PROFILE.md`) and landed the
-first wins (day 41, `benchmarks/OPTIMIZATIONS.md`): a leaf-atom fast path in the capturer
-(−11–16%) and a compiled-regex redactor (−78% on the per-local secret-name check). The
-largest remaining lever — a fused capture+hash pass — was **deferred by Amdahl's law**, not
-hand-waved: a native rewrite caps at ~3.7× and isn't worth breaking the recorder's
-zero-dependency guarantee for yet ([ADR-0013](docs/adr/0013-performance-plan.md)).
+1. **`pdb`** — a never-hit breakpoint left attached: full per-line dispatch, what people actually pay.
+2. **coverage.py** — records only *which lines ran* (a set), and on 3.14 `DISABLE`s each line after its **first** hit, so a hot loop is nearly free. It does far less than a trace; its cheapness is *because* it records less, not because it is faster per event.
+3. **ChronoTrace flow** — the default: the full **ordered** event stream (every LINE/CALL/RETURN), scoped to your own code. On realistic code it is **~6×, roughly 6× cheaper than `pdb`** — because scope filtering (`DISABLE` on the stdlib) cut this workload from ~197k recorded events to 13k. Recording an ordered stream is why it costs more than coverage's set.
+4. **ChronoTrace +capture** — every variable's *value* at every line. This is the opt-in deep-inspection mode and it is what costs the four-figure numbers; reach for it when you need to *see* state, not just flow.
+
+The worst case (tight loop + capture, **~2,500×**) is the number a hostile reader
+should quote, so it is in the table, not a footnote. It is high because sound
+change-detection must re-walk mutable locals every line; the levers are narrower
+`--include` scope and `--sample` (record every Nth hit — **planned, issue #18**, not
+yet built, so it has no measured row). A native (Rust) capturer was profiled and
+**deliberately declined** — Amdahl caps the win at ~3.6× for a week of work plus a
+permanent build matrix ([ADR-0014](docs/adr/0014-no-native-extension.md)). Phase 6
+also corrected these numbers: earlier tight-loop figures (~102×/1,270×) were stale —
+the recorder evolved through day 42 and they no longer reproduce under the current
+subprocess-isolated, GC-honest suite, which supersedes them.
+
+## When *not* to use ChronoTrace
+
+An honest tool names its own failure modes. Do not reach for ChronoTrace when:
+
+- **The bug is timing-dependent — a race, a deadlock window, an ordering hazard.**
+  Recording changes timing: every callback and value capture adds latency the real
+  program never pays, so the bug **may not reproduce under recording, or may
+  reproduce differently.** This *observer effect* is a property of observing a
+  running program (every tracer here, `pdb` included, perturbs timing), not a defect
+  we can fix. For these, reach for a live debugger or targeted logging.
+- **The hot path is a tight numeric loop and you need value capture.** Overhead
+  tracks Python lines executed, so a million-iteration inner loop with capture on is
+  the ~2,500× case above. Record it flow-only, narrow the `--include` scope, or wait
+  for `--sample`.
+- **It's production.** ChronoTrace is a *development* debugger. The overhead is
+  opt-in and the recordings are large; this is not an always-on production tracer.
+- **Recordings must stay small.** A value-capture recording is bytes-per-event tiny
+  after dedup + zstd, but a long run is still large on disk — a debugger trades disk
+  for the ability to step backwards, and that trade is not always the one you want.
+
+For I/O-bound programs, code you can scope tightly, and bugs you'd otherwise chase by
+re-running under `pdb`, it is a good trade — which is the rest of this README.
 
 ## How it works
 
