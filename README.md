@@ -6,6 +6,15 @@
      When recorded, replace this comment with the image:
      <p align="center"><img src="docs/media/hero-scrub.gif" alt="Scrubbing backward through a recording to find an aliased dict" width="800"></p> -->
 
+## Install
+
+```bash
+pipx install chronotrace
+```
+
+Python 3.12+. No compiler and no Node.js — the browser UI ships **prebuilt in the wheel**.
+Add the scrubber UI with `pipx install "chronotrace[ui]"`. [Full guide](docs/installation.md).
+
 > ▶ **The demo, in one motion:** run a pipeline that prints three identical regional totals — no
 > traceback, every `+=` looks right. Drag the timeline **backward** and watch `total` *un-change*
 > until, 815 events before the symptom, the three regions are already the **same dict**. A bug
