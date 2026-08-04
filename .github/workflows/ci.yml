@@ -114,8 +114,11 @@ jobs:
           python -m build --wheel
 
       - name: Assert wheel contents (UI in, tests/spikes/benchmarks/source-maps out, size sane)
+        # hypothesis too: the root conftest imports it and pyproject's addopts select a
+        # hypothesis profile, so pytest cannot even collect without it. test_wheel itself only
+        # inspects the built dist/*.whl -- it imports nothing from chronotrace.
         run: |
-          pip install pytest
+          pip install pytest hypothesis
           pytest tests/packaging -q
 
       - name: Clean-room install -- no compiler, no Node, no cache (Dockerfile.clean)
