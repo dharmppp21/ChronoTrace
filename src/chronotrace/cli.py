@@ -12,67 +12,46 @@ recording stays dependency-light.
 
 Stdlib `argparse`, not a CLI framework: a handful of flags do not justify a dependency
 the recorder's process would then carry (see the zero-deps note in pyproject.toml).
+
+Startup cost is a feature. Every heavy import (`store` pulls zstandard/msgpack C
+extensions; `query`, `index`, `recorder` pull the engine) lives INSIDE the command that
+needs it, never at module top -- so `chronotrace --help` and `--version` import almost
+nothing and stay under ~100 ms, while a real command pays only for what it uses. A CLI
+that takes 400 ms to print its help feels broken, and `--help` importing FastAPI would be
+exactly that. `from __future__ import annotations` keeps the type hints below as strings,
+so the `TYPE_CHECKING` block feeds mypy without importing anything at runtime.
 """
 
 from __future__ import annotations
 
 import argparse
-import ast
-import hashlib
-import io
 import os
-import runpy
-import socket
-import subprocess
 import sys
-import time
-import webbrowser
-from collections.abc import Iterable
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from chronotrace.config import RecorderConfig, find_pyproject, load_config
-from chronotrace.index import Progress, build_index
-from chronotrace.query import (
-    PAGE_SIZE,
-    CallersOfQuery,
-    CallTreeQuery,
-    Cursor,
-    ExceptionOriginQuery,
-    Hit,
-    LastWriteBeforeQuery,
-    LineHitsQuery,
-    Query,
-    QueryContext,
-    QueryError,
-    QueryResult,
-    RetroBreakpointQuery,
-    ValueProvenanceQuery,
-    VarWritesQuery,
-    WatchQuery,
-    registry,
-)
-from chronotrace.query.watch import ANY as WATCH_ANY
-from chronotrace.recorder import MemorySink, Recorder
-from chronotrace.recorder.redact import Redactor
-from chronotrace.recorder.scope import Scope
-from chronotrace.recorder.sink import Sink
-from chronotrace.repl import Repl
-from chronotrace.store import (
-    ChronoError,
-    ChronoReader,
-    ChronoWriter,
-    StreamingFileSink,
-    Strings,
-    repair,
-)
-from chronotrace.store.strings import CodeInfo
+if TYPE_CHECKING:
+    from collections.abc import Iterable
+
+    from chronotrace.config import RecorderConfig
+    from chronotrace.index import Progress
+    from chronotrace.query import Hit, Query, QueryResult
+    from chronotrace.recorder import MemorySink, Recorder
+    from chronotrace.recorder.sink import Sink
+    from chronotrace.store import Strings
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """The argument parser. Subcommands leave room for `serve` (day 33+)."""
+    """The argument parser. Pure argparse -- it imports no engine, so `--help` stays cheap."""
     parser = argparse.ArgumentParser(prog="chronotrace", description=__doc__)
-    sub = parser.add_subparsers(dest="command", required=True)
+    parser.add_argument(
+        "--version",
+        action="store_true",
+        help="show the package, .chrono format, and [ui]-extra versions, then exit",
+    )
+    # required=False so `chronotrace --version` (no subcommand) parses; main() prints help
+    # when neither a command nor --version is given.
+    sub = parser.add_subparsers(dest="command", required=False)
 
     rec = sub.add_parser("record", help="record a script's execution")
     rec.add_argument("--include", action="append", metavar="GLOB", help="force a file into scope")
@@ -166,6 +145,28 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _print_version() -> None:
+    """Report package + `.chrono` format + whether `[ui]` is installed -- line one of a bug report.
+
+    `find_spec` locates fastapi/uvicorn without importing (and running) them, so `--version`
+    stays cheap. The package version comes from installed metadata, falling back to the source
+    literal for an editable/uninstalled checkout.
+    """
+    from importlib.metadata import PackageNotFoundError, version
+    from importlib.util import find_spec
+
+    from chronotrace.store.constants import FORMAT_VERSION_MAJOR, FORMAT_VERSION_MINOR
+
+    try:
+        pkg = version("chronotrace")
+    except PackageNotFoundError:
+        from chronotrace._version import __version__ as pkg
+    ui = "installed" if find_spec("fastapi") and find_spec("uvicorn") else "not installed"
+    print(f"chronotrace {pkg}")  # noqa: T201
+    print(f".chrono format {FORMAT_VERSION_MAJOR}.{FORMAT_VERSION_MINOR}")  # noqa: T201
+    print(f"[ui] extra: {ui}")  # noqa: T201
+
+
 def record_script(
     script: str, script_args: list[str], config: RecorderConfig, sink: Sink
 ) -> Recorder:
@@ -187,6 +188,12 @@ def record_script(
 
     Complexity: dominated by running the target program.
     """
+    import runpy
+
+    from chronotrace.recorder import Recorder
+    from chronotrace.recorder.redact import Redactor
+    from chronotrace.recorder.scope import Scope
+
     script_path = Path(script).resolve()
     roots = list(config.roots) or [str(script_path.parent)]
     recorder = Recorder(
@@ -212,6 +219,8 @@ def repair_recording(path: str, out: str | None) -> int:
     it reports are the real recovered ones. A recording that is already intact is left
     untouched -- `repair` is idempotent.
     """
+    from chronotrace.store import ChronoError, ChronoReader, repair
+
     src = Path(path)
     try:
         with ChronoReader.open(src) as reader:
@@ -240,6 +249,11 @@ def step_command(args: argparse.Namespace) -> int:
     than shortcutting past the format, so the demo exercises writer, reader and
     reconstruction end to end.
     """
+    from chronotrace.config import find_pyproject, load_config
+    from chronotrace.recorder import MemorySink
+    from chronotrace.repl import Repl
+    from chronotrace.store import ChronoError, ChronoReader
+
     target = Path(args.target)
     if target.suffix == ".chrono":
         try:
@@ -275,6 +289,9 @@ def intern_tables(recorder: Recorder) -> Strings:
     `InternTable` and the recorder must not know a file format exists. The CLI is the
     only place that legitimately knows about both.
     """
+    from chronotrace.store import Strings
+    from chronotrace.store.strings import CodeInfo
+
     return Strings(
         names=tuple(recorder.names),
         exc_types=tuple(recorder.exc_types),
@@ -295,6 +312,8 @@ def _source_hashes(filenames: Iterable[str]) -> tuple[tuple[str, str], ...]:
     reads it as "cannot verify", never as "verified". The recorder itself never does this
     I/O; it belongs above the hot path.
     """
+    import hashlib
+
     digests: dict[str, str] = {}
     for filename in filenames:
         if filename in digests:
@@ -312,6 +331,10 @@ def _to_chrono(recorder: Recorder, sink: MemorySink) -> bytes:
     Values go in first and in reference order, so the pool's own content-addressed
     numbering lands on the `value_ref`s the events already cite.
     """
+    import io
+
+    from chronotrace.store import ChronoWriter
+
     buf = io.BytesIO()
     writer = ChronoWriter(buf)
     writer.add_strings(intern_tables(recorder))
@@ -338,6 +361,9 @@ def index_command(path: str) -> int:
     Idempotent: an existing index is replaced atomically, so running it twice is safe and
     running it on a recording that already has a current index simply rebuilds one.
     """
+    from chronotrace.index import build_index
+    from chronotrace.store import ChronoError, ChronoReader
+
     recording = Path(path)
     try:
         with ChronoReader.open(recording) as reader:
@@ -369,6 +395,9 @@ def query_command(args: argparse.Namespace) -> int:
     a bare recording just works -- it waits, once, rather than failing with "run index
     first". `--list` needs no recording; every other form needs exactly one query flag.
     """
+    from chronotrace.query import PAGE_SIZE, Cursor, QueryContext, QueryError, registry
+    from chronotrace.store import ChronoError
+
     if args.list:
         for name, summary in registry.summaries().items():
             print(f"  {name:12s} {summary}")  # noqa: T201
@@ -404,6 +433,18 @@ def _build_query(args: argparse.Namespace) -> Query:
     composed query (origin then provenance) is a call, not a parse. A DSL would have made
     this a grammar; here it is a dispatch (see the day-28 no-DSL decision, #13).
     """
+    from chronotrace.query import (
+        CallersOfQuery,
+        CallTreeQuery,
+        ExceptionOriginQuery,
+        LastWriteBeforeQuery,
+        LineHitsQuery,
+        RetroBreakpointQuery,
+        ValueProvenanceQuery,
+        VarWritesQuery,
+        WatchQuery,
+    )
+
     given = {
         name: value
         for name, value in (
@@ -458,6 +499,10 @@ def _file_line(flag: str, value: str) -> tuple[str, int]:
 
 def _literal(flag: str, value: str | None) -> Any:
     """Parse a `--changed-*` filter value as a Python literal, or `ANY` when absent."""
+    import ast
+
+    from chronotrace.query.watch import ANY as WATCH_ANY
+
     if value is None:
         return WATCH_ANY
     try:
@@ -559,6 +604,9 @@ def _empty_note(args: argparse.Namespace) -> str:
 
 def record_command(args: argparse.Namespace) -> int:
     """Record the target script to a `.chrono` file and index it."""
+    from chronotrace.config import find_pyproject, load_config
+    from chronotrace.recorder import MemorySink
+
     config = load_config(
         pyproject=find_pyproject(),
         env=os.environ,
@@ -603,9 +651,12 @@ def record_ui(args: argparse.Namespace, config: RecorderConfig, out: Path) -> in
     complete, fully-scrubbable `.chrono`. Until then the live view shows control flow and
     density -- the detail a scrub needs is written at the end.
     """
-    try:
-        import uvicorn  # noqa: F401 -- a presence check; the subprocess is what serves
-    except ModuleNotFoundError:
+    import subprocess
+    import webbrowser
+
+    from chronotrace.store import StreamingFileSink
+
+    if _find_uvicorn() is None:
         print(  # noqa: T201
             "chronotrace: --ui needs the optional [ui] extra: pip install chronotrace[ui]",
             file=sys.stderr,
@@ -641,8 +692,22 @@ def record_ui(args: argparse.Namespace, config: RecorderConfig, out: Path) -> in
     return 0
 
 
+def _find_uvicorn() -> object | None:
+    """The uvicorn module spec if installed, else None -- a presence check that never imports it.
+
+    `--ui` runs the server in a subprocess, so this process only needs to *know* uvicorn is
+    installed, not import it. `find_spec` answers that without paying the import cost.
+    """
+    from importlib.util import find_spec
+
+    return find_spec("uvicorn")
+
+
 def _wait_for_port(port: int, *, timeout: float = 10.0) -> bool:
     """Poll `127.0.0.1:port` until the live server is accepting connections, or time out."""
+    import socket
+    import time
+
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         with socket.socket() as probe:
@@ -695,6 +760,12 @@ def serve_command(args: argparse.Namespace) -> int:
 def main(argv: list[str] | None = None) -> int:
     """Parse arguments and dispatch to the chosen subcommand. Returns a process exit code."""
     args = build_parser().parse_args(argv)
+    if args.version:
+        _print_version()
+        return 0
+    if args.command is None:
+        build_parser().print_help(sys.stderr)
+        return 2
     if args.command == "repair":
         return repair_recording(args.file, args.out)
     if args.command == "serve":
