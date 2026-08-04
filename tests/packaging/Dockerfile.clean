@@ -1,0 +1,42 @@
+# Clean-room install proof. If ChronoTrace installs and records HERE, it installs on a
+# stranger's machine -- because this image has none of the ten weeks of state yours does.
+#
+#   docker build -f tests/packaging/Dockerfile.clean -t chronotrace-clean .
+#
+# Every RUN is an assertion: if any step fails, `docker build` fails, and that failure is the
+# packaging bug caught before a user hits it. Build context is the repo root (for dist/).
+#
+# Deliberately absent, and NOT installed:
+#   * a C compiler (no build-essential) -- a pure-Python + prebuilt-wheel install must not need
+#     one. zstandard and msgpack ship manylinux wheels, so pip never compiles. If that ever
+#     stops being true, this build fails to compile and tells us, instead of a user.
+#   * Node / npm -- the browser UI is prebuilt inside the wheel; installing it must not need a
+#     JS toolchain.
+#   * a pip cache -- --no-cache-dir, so a dependency that only "works" because it was cached on
+#     the maintainer's machine is exposed here.
+FROM python:3.12-slim
+
+WORKDIR /app
+COPY dist/*.whl /tmp/
+
+# Core install only -- NO [ui] extra. Recording must be dependency-light, and the [ui]-missing
+# path below must be the actionable error, not an ImportError.
+RUN pip install --no-cache-dir /tmp/*.whl
+
+# 1. --version works and honestly reports that [ui] is absent in a core install.
+RUN chronotrace --version && chronotrace --version | grep -q 'not installed'
+
+# 2. `serve` without [ui] must exit 1 with an ACTIONABLE message ("pip install chronotrace[ui]"),
+#    never a raw ImportError traceback -- a stack trace as an error message is a UX failure.
+RUN code=0; out="$(chronotrace serve --dir /tmp 2>&1)" || code=$?; \
+    echo "$out"; \
+    [ "$code" -eq 1 ] || { echo "FAIL: expected exit 1, got $code"; exit 1; }; \
+    echo "$out" | grep -q 'chronotrace\[ui\]' || { echo "FAIL: no actionable [ui] hint"; exit 1; }
+
+# 3. Record a real bug and query it end to end -- the whole point of the tool, on a clean machine.
+RUN printf 'def run(n):\n    total = 0\n    for i in range(n):\n        total += i\n    return total\nrun(5)\n' > /tmp/bug.py
+RUN chronotrace record --out /tmp/bug.chrono --no-index /tmp/bug.py
+RUN chronotrace query /tmp/bug.chrono --line-hits /tmp/bug.py:4 | grep -q 'bug.py:4'
+
+# If the build reaches here, a stranger's `pip install` works.
+RUN echo "clean-room install OK: recorded and queried with no compiler, no Node, no cache."

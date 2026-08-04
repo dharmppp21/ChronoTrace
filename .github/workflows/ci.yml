@@ -88,6 +88,40 @@ jobs:
       - name: Perf regression guards
         run: pytest -m perf -q
 
+  # Packaging (Phase 7, day 44). Builds the real wheel -- the frontend build hook runs here, so
+  # Node is set up -- then proves two things a matrix `pip install -e` never can: the wheel's
+  # CONTENTS are right (UI bundled, tests/spikes/benchmarks and source maps NOT), and it installs
+  # and works in a container with NO compiler, NO Node, and NO pip cache. "Works on my machine" is
+  # exactly the failure this catches; ten weeks of accumulated state do not exist in the container.
+  package:
+    name: package (wheel + clean install)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"  # the floor: if the wheel installs here, it installs above
+          cache: pip
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Build the wheel (the frontend build hook runs here)
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build --wheel
+
+      - name: Assert wheel contents (UI in, tests/spikes/benchmarks/source-maps out, size sane)
+        run: |
+          pip install pytest
+          pytest tests/packaging -q
+
+      - name: Clean-room install -- no compiler, no Node, no cache (Dockerfile.clean)
+        # Every RUN in the Dockerfile is an assertion; a failed `docker build` IS the caught bug.
+        run: docker build -f tests/packaging/Dockerfile.clean -t chronotrace-clean .
+
   # The frontend (Phase 5, day 35) is built in Antigravity and lands in `frontend/`. These
   # steps are guarded on that directory existing, so this job is green today (they skip) and
   # enforces build + types + tests the moment the UI is committed -- a DTO change that breaks
