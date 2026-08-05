@@ -137,12 +137,17 @@ artifacts = ["src/chronotrace/_ui/**"]
 [tool.hatch.build.targets.wheel.hooks.custom]
 path = "hatch_build.py"
 
-# The sdist ships source (including tests) but NOT the built _ui/ or frontend/ node tooling: it
-# is the "build it yourself" artifact, and building the UI from it needs Node. The wheel is the
-# artifact a normal user installs, and it carries the prebuilt UI. Users never download spikes/
-# or benchmarks/ in either -- neither is listed here, and the wheel ships only src/chronotrace.
+# The sdist ships source (including tests) but NOT the frontend node tooling: it is the "build
+# it yourself" artifact, and a wheel built from it is API-only (no Node needed -- the build hook
+# degrades when the frontend/ lockfile is absent). The wheel is the artifact a normal user
+# installs, and it carries the prebuilt UI. Users never download spikes/ or benchmarks/ in either.
+#
+# `exclude` is load-bearing: the `tests` include otherwise also matches `frontend/tests/`, which
+# dragged a stray spec file into the sdist. Excluding frontend/ keeps the sdist to real source and
+# means a wheel built from it finds no frontend/ and cleanly produces an API-only wheel.
 [tool.hatch.build.targets.sdist]
 include = ["src/chronotrace", "tests", "docs", "README.md", "LICENSE"]
+exclude = ["frontend"]
 
 # ---------------------------------------------------------------------------
 # Lint + format (ruff is both; there is exactly one formatter in this project)

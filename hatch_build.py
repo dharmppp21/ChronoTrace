@@ -54,8 +54,13 @@ class FrontendBuildHook(BuildHookInterface):  # type: ignore[type-arg]  # hatchl
         if os.environ.get("CHRONOTRACE_SKIP_UI_BUILD"):
             self._note_prebuilt(out, reason="CHRONOTRACE_SKIP_UI_BUILD is set")
             return
-        if not frontend.is_dir():
-            self._note_prebuilt(out, reason="no frontend/ source in this tree")
+        # Require the lockfile specifically: we use `npm ci`, which refuses to run without one.
+        # An sdist carries only a partial frontend/ (no lockfile), so this is the guard that lets
+        # `pip install` from an sdist DEGRADE to an API-only wheel instead of hard-failing on
+        # `npm ci`. A full source checkout has the lockfile and builds the real UI.
+        lockfile = frontend / "package-lock.json"
+        if not lockfile.is_file():
+            self._note_prebuilt(out, reason="no frontend/package-lock.json (partial tree)")
             return
 
         npm = shutil.which("npm")
