@@ -671,10 +671,15 @@ def record_ui(args: argparse.Namespace, config: RecorderConfig, out: Path) -> in
             return 1
         sink = StreamingFileSink(out)  # creates the file, so the session exists before the browser
         base = f"http://127.0.0.1:{args.port}"
+        # Open the scrubber, not the API explorer. `_mount_ui` serves the built SPA at `/` when
+        # the wheel carries one, so ask the same question it does and land the user on the thing
+        # they asked for. `/docs` is the honest fallback for an API-only install: a raw endpoint
+        # list is a poor greeting, but it beats a 404 telling them nothing works.
+        landing = f"{base}/" if _has_bundled_ui() else f"{base}/docs"
         print(  # noqa: T201
-            f"chronotrace: recording live -> {out} (session {out.stem!r}); watch at {base}/docs"
+            f"chronotrace: recording live -> {out} (session {out.stem!r}); watch at {landing}"
         )
-        webbrowser.open(f"{base}/docs")  # the API explorer until the scrubber UI lands (day 35)
+        webbrowser.open(landing)
         recorder = record_script(args.script, args.script_args, config, sink)
         sink.finalize(recorder.values, intern_tables(recorder))
         print(  # noqa: T201
@@ -701,6 +706,17 @@ def _find_uvicorn() -> object | None:
     from importlib.util import find_spec
 
     return find_spec("uvicorn")
+
+
+def _has_bundled_ui() -> bool:
+    """Whether this install carries the built scrubber, so `--ui` knows where to send the browser.
+
+    Deliberately a filesystem check on the same path `server.app._mount_ui` mounts, rather than
+    importing that module: `--ui` runs the server in a SUBPROCESS, and importing the server here
+    would drag FastAPI into the recording process -- the one process that must stay
+    dependency-light, because it is the user's own program.
+    """
+    return (Path(__file__).resolve().parent / "_ui" / "index.html").is_file()
 
 
 def _wait_for_port(port: int, *, timeout: float = 10.0) -> bool:

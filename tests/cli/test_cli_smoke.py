@@ -35,6 +35,23 @@ def test_no_command_prints_help_and_fails(capsys: pytest.CaptureFixture[str]) ->
     assert "usage" in capsys.readouterr().err.lower()
 
 
+def test_ui_landing_page_follows_whether_the_scrubber_is_bundled() -> None:
+    """`record --ui` must open the scrubber, not the API explorer.
+
+    It opened `/docs` for a long time -- correct while the UI did not exist yet, and quietly
+    wrong from the day it landed, because nothing failed: the browser opened, showed a list of
+    endpoints, and the one-command "watch it record" promise silently delivered the wrong page.
+    A stale fallback that still *works* is exactly the kind that survives.
+
+    The assertion is that the CLI agrees with the server about what is installed, since
+    `server.app._mount_ui` serves the SPA at `/` under the same condition.
+    """
+    from chronotrace.cli import _has_bundled_ui
+    from chronotrace.server.app import _UI_DIR
+
+    assert _has_bundled_ui() == (_UI_DIR / "index.html").is_file()
+
+
 def test_importing_the_cli_does_not_pull_the_engine() -> None:
     # Fresh subprocess so sys.modules is clean of what other tests have imported.
     probe = (
