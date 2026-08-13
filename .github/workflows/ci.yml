@@ -147,7 +147,11 @@ jobs:
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: "20"
+          # Keep in step with the `ui` stage in the Dockerfile. Dependabot bumps the image
+          # there but cannot see this value, so left alone they drift -- and then CI builds the
+          # frontend with one toolchain while the published image builds it with another, which
+          # is exactly the reproducibility property the wheel is supposed to have.
+          node-version: "26"
 
       - name: Build the wheel (the frontend build hook runs here)
         run: |
@@ -178,7 +182,11 @@ jobs:
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: "20"
+          # Keep in step with the `ui` stage in the Dockerfile. Dependabot bumps the image
+          # there but cannot see this value, so left alone they drift -- and then CI builds the
+          # frontend with one toolchain while the published image builds it with another, which
+          # is exactly the reproducibility property the wheel is supposed to have.
+          node-version: "26"
 
       - name: Install
         if: hashFiles('frontend/package-lock.json') != ''
@@ -217,7 +225,11 @@ jobs:
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: "20"
+          # Keep in step with the `ui` stage in the Dockerfile. Dependabot bumps the image
+          # there but cannot see this value, so left alone they drift -- and then CI builds the
+          # frontend with one toolchain while the published image builds it with another, which
+          # is exactly the reproducibility property the wheel is supposed to have.
+          node-version: "26"
 
       - name: Install (server + UI extra)
         if: hashFiles('frontend/package.json') != ''
