@@ -60,13 +60,25 @@ mints a short-lived OIDC token that proves "this is workflow X in repo Y", and P
 it for upload rights it grants only to that exact identity. Nothing long-lived exists to leak,
 rotate, or accidentally print into a log.
 
-On **TestPyPI** (<https://test.pypi.org/manage/account/publishing/>) and again on **PyPI**
-(<https://pypi.org/manage/account/publishing/>), add a pending publisher with exactly these
-values:
+**There are two different forms, and which one you need depends on whether the project already
+exists on that index.** Getting this wrong is the first thing that goes wrong, because the
+obvious page — "publishing" under your *account* — rejects a name that is already taken with a
+message that reads like a name collision rather than "you are on the wrong form".
+
+- **Project does not exist yet on that index** → *account* → Publishing → **add a pending
+  publisher**. This reserves the name and configures it in one step.
+  - PyPI: <https://pypi.org/manage/account/publishing/>
+- **Project already exists and you own it** → that *project* → Settings → Publishing → **add a
+  publisher**. A pending publisher is not available, and not needed.
+  - TestPyPI: <https://test.pypi.org/manage/project/chronotrace/settings/publishing/>
+  - `chronotrace` already exists on TestPyPI because it was uploaded there by hand, with a
+    token, before this pipeline existed. That is the normal state after any manual dry run.
+
+Either form takes the same values:
 
 | Field | Value |
 |-------|-------|
-| PyPI project name | `chronotrace` |
+| PyPI project name | `chronotrace` (pending-publisher form only) |
 | Owner | `dharmppp21` |
 | Repository name | `ChronoTrace` |
 | Workflow name | `release.yml` |
@@ -75,6 +87,10 @@ values:
 The environment name must match the `environment:` in the `publish` job. If OIDC publishing
 fails, this table is almost always the reason — the error message names the field that did not
 match, so read it rather than guessing.
+
+Once a trusted publisher is configured, the API token used for that manual upload is dead
+weight with real blast radius. Delete it on the index, and delete `~/.pypirc` if it holds one —
+the whole point of OIDC is that no long-lived credential exists to leak.
 
 ### 2. Create the matching GitHub environments
 
