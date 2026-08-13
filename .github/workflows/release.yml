@@ -114,11 +114,27 @@ jobs:
           pip install -e ".[dev]"
           pytest -m "not perf"
 
-      - name: Build
+      # Two SEPARATE invocations, and that is load-bearing. A bare `python -m build` builds the
+      # sdist and then builds the wheel FROM THAT SDIST -- and the sdist deliberately excludes
+      # frontend/, so the hook finds no lockfile, correctly degrades, and produces an API-ONLY
+      # wheel. Publishing that to PyPI would ship a `chronotrace serve` with no UI, permanently
+      # and silently. `--wheel` on its own builds from the source tree, where frontend/ and its
+      # lockfile exist and Node is set up above, so the UI is bundled.
+      - name: Build the sdist and the wheel, each from source
         run: |
           python -m pip install --upgrade build twine
-          python -m build
+          python -m build --sdist
+          python -m build --wheel
           python -m twine check dist/*
+
+      # Assert the wheel is the one we meant to ship before anything can publish it. These are
+      # the same packaging tests CI runs on every PR (UI bundled, tests/spikes/benchmarks and
+      # source maps excluded, size sane) -- reused rather than restated, so the release cannot
+      # drift from the definition of a correct wheel.
+      - name: Assert wheel contents (UI bundled, maintainer dirs excluded)
+        run: |
+          pip install pytest hypothesis
+          pytest tests/packaging -q
 
       # An SBOM because of what this package IS. ChronoTrace is imported into the user's process
       # and reads their program's memory; asking someone to `pip install` that carries an unusually
