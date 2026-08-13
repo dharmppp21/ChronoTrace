@@ -8,6 +8,13 @@
 # fine -- which is exactly the class of bug a build alone cannot catch.
 set -euo pipefail
 
+# Git Bash on Windows rewrites arguments that look like POSIX paths into Windows ones before
+# they reach docker.exe, so `docker run IMAGE test -f /demo/demo.chrono` arrives as
+# `C:/Program Files/Git/demo/demo.chrono` and reports the file missing. The image is fine; the
+# harness lied. This is inert on Linux (where CI runs) and stops a maintainer on Windows from
+# chasing a container bug that does not exist.
+export MSYS_NO_PATHCONV=1
+
 IMAGE="${1:?usage: smoke_image.sh IMAGE}"
 NAME="chronotrace-smoke-$$"
 PORT=8000
