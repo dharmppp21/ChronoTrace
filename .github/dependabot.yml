@@ -49,3 +49,11 @@ updates:
     groups:
       frontend:
         patterns: ["*"]
+    ignore:
+      # TypeScript majors, until openapi-typescript catches up. It declares a peer dependency
+      # on typescript@^5.x, so a bump to 7 makes `npm ci` fail ERESOLVE and the demo image
+      # stops building. Without this the same broken PR is proposed every week and has to be
+      # rejected every week, which is how people learn to ignore Dependabot entirely.
+      # Remove this rule once openapi-typescript supports the newer major.
+      - dependency-name: "typescript"
+        update-types: ["version-update:semver-major"]
