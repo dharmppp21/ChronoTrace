@@ -11,6 +11,7 @@ It must never know what a query *means* -- only how to turn an id into text.
 
 from __future__ import annotations
 
+import os.path
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
@@ -51,21 +52,45 @@ def name_id(db: sqlite3.Connection, name: str) -> int:
     return int(row[0])
 
 
+def _path_key(path: str) -> str:
+    r"""A path as the platform actually compares paths -- the key for matching, never for display.
+
+    Paths reach us as raw text from two places that spell the same file differently: the
+    recording interned whatever `__file__` held, while the user types whatever their shell
+    completed. On Windows those disagree constantly -- `C:/src/app.py` and `C:\src\app.py`
+    are one file, and so is `c:\SRC\App.py`, but all three are distinct strings. Comparing
+    the raw text made a correct query report "no file matching", which reads as "your
+    recording is wrong" when the recording was fine.
+
+    `os.path.normcase` is exactly this: it folds separators and case on Windows and is the
+    identity on POSIX, where `/` is the only separator and case is significant. Wrapping
+    `normpath` first also collapses `./` and redundant separators. Doing this by hand --
+    `.replace("\\", "/").lower()` -- would be wrong on POSIX, where a backslash is a legal
+    character in a filename and case matters.
+    """
+    return os.path.normcase(os.path.normpath(path))
+
+
 def resolve_file(db: sqlite3.Connection, name: str) -> tuple[int, str]:
     """The one interned file the user meant, by full path or basename, as `(file_id, path)`.
 
     A bare filename is what a user reading source types, so it is accepted -- but if two
     recorded files share it the question is ambiguous, and guessing one would answer about
-    the wrong file. An exact path always wins over a basename match.
+    the wrong file. An exact path always wins over a basename match. Matching is
+    platform-aware (see `_path_key`), so on Windows the separator and case a user typed do
+    not decide whether their file is found.
 
     Raises:
         UnknownFile: nothing matched, or a bare name matched several files.
     """
     rows = db.execute("SELECT file_id, path FROM files").fetchall()
-    exact = [(int(fid), path) for fid, path in rows if path == name]
+    # The returned path is always the one the RECORDING interned, never the normalised key --
+    # results should echo the file as it was recorded, not a lowercased rewrite of it.
+    wanted = _path_key(name)
+    exact = [(int(fid), path) for fid, path in rows if _path_key(path) == wanted]
     if exact:
         return exact[0]
-    by_name = [(int(fid), path) for fid, path in rows if Path(path).name == name]
+    by_name = [(int(fid), path) for fid, path in rows if _path_key(Path(path).name) == wanted]
     if not by_name:
         raise UnknownFile(f"no file matching {name!r} is in this recording")
     if len(by_name) > 1:

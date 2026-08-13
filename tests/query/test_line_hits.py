@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import sys
+
 import pytest
 
 from chronotrace.query import LineHitsQuery, QueryContext, UnknownFile
+from chronotrace.query._resolve import resolve_file
 
 from .conftest import fake_ctx, synthetic_db
 
@@ -56,3 +59,37 @@ def test_a_full_path_resolves_even_when_the_basename_is_ambiguous() -> None:
     db.execute("INSERT INTO line_hits(file_id, lineno, seq) VALUES (1, 5, 7)")
     result = LineHitsQuery("/a/app.py", 5).execute(fake_ctx(db))
     assert [h.seq for h in result.hits] == [7]
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="separator and case folding are Windows rules")
+@pytest.mark.parametrize(
+    "typed",
+    [
+        "C:/proj/app.py",  # forward slashes: what a shell, a URL or a habit produces
+        "c:\\proj\\app.py",  # different case: Windows filesystems do not distinguish it
+        "C:\\proj\\.\\app.py",  # a redundant './' segment
+    ],
+)
+def test_windows_paths_resolve_however_the_user_spelled_them(typed: str) -> None:
+    """The recording interns whatever `__file__` held; the user types whatever they type.
+
+    On Windows those routinely disagree on separator and case for the *same* file, and a raw
+    string comparison rejected the query with "no file matching" -- which reads as a broken
+    recording rather than a spelling difference. Regression test for that report.
+    """
+    db = synthetic_db()
+    db.execute("INSERT INTO files(file_id, path) VALUES (?,?)", (1, "C:\\proj\\app.py"))
+    file_id, path = resolve_file(db, typed)
+    assert file_id == 1
+    assert path == "C:\\proj\\app.py", "results echo the recorded path, not the normalised key"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX paths are case-sensitive")
+def test_posix_paths_stay_case_sensitive() -> None:
+    """Normalising must not quietly make POSIX case-insensitive: there, these are two files."""
+    db = synthetic_db()
+    db.executemany(
+        "INSERT INTO files(file_id, path) VALUES (?,?)", [(1, "/a/App.py"), (2, "/a/app.py")]
+    )
+    assert resolve_file(db, "/a/app.py") == (2, "/a/app.py")
+    assert resolve_file(db, "/a/App.py") == (1, "/a/App.py")
