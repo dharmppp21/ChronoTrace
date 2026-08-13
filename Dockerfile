@@ -18,7 +18,7 @@
 # ---------------------------------------------------------------------------
 # Stage 1: build the browser UI. Node lives and dies in this stage.
 # ---------------------------------------------------------------------------
-FROM node:20-slim AS ui
+FROM node:26-slim AS ui
 WORKDIR /build
 
 # Lockfile first, in its own layer: dependencies change far less often than source, so an edit
