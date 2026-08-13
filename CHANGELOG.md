@@ -20,26 +20,11 @@ Entries are grouped as Added / Changed / Deprecated / Removed / Fixed / Security
 
 Nothing yet.
 
-## [0.1.0rc2] - 2026-08-13
+## [0.1.0] - 2026-08-13
 
-### Fixed
-
-- **Queries find your file however you spelled its path.** On Windows,
-  `chronotrace query run.chrono --break C:/proj/app.py:42` reported
-  `no file matching` because the recording had interned the path with backslashes. Separator
-  and letter case no longer decide whether your file is found. POSIX paths stay
-  case-sensitive, as they should be.
-
-### Changed
-
-- The demo image now runs on Python 3.14, and its dependencies, build toolchain and CI actions
-  were updated. No behaviour change for users of the package.
-
-## [0.1.0rc1] - 2026-08-13
-
-The first published release candidate: a complete, installable time-travel debugger. Everything
-below was built over the preceding phases; this is the first time any of it is available to
-someone who is not building it from source.
+The first public release: a complete, installable time-travel debugger. Everything below was
+built over the preceding phases; this is the first time any of it is available to someone who
+is not building it from source.
 
 ### Added
 
@@ -69,6 +54,11 @@ someone who is not building it from source.
   `zstandard` and `msgpack`; the web server lives behind `chronotrace[ui]`, and asking for
   `chronotrace serve` without it gives an actionable message rather than an `ImportError`.
 
+- **Paths are matched the way your platform matches them.** On Windows the separator and letter
+  case you type no longer decide whether a query finds your file, so
+  `--break C:/proj/app.py:42` works against a recording that interned `C:\proj\app.py`. POSIX
+  paths stay case-sensitive, as they should be.
+
 ### Known limitations
 
 Stated here rather than discovered later:
@@ -87,6 +77,10 @@ Stated here rather than discovered later:
 
 [#9]: https://github.com/dharmppp21/ChronoTrace/issues/9
 [#18]: https://github.com/dharmppp21/ChronoTrace/issues/18
-[Unreleased]: https://github.com/dharmppp21/ChronoTrace/compare/v0.1.0rc2...HEAD
-[0.1.0rc2]: https://github.com/dharmppp21/ChronoTrace/releases/tag/v0.1.0rc2
-[0.1.0rc1]: https://github.com/dharmppp21/ChronoTrace/releases/tag/v0.1.0rc1
+[Unreleased]: https://github.com/dharmppp21/ChronoTrace/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/dharmppp21/ChronoTrace/releases/tag/v0.1.0
+
+<!-- 0.1.0rc1 and 0.1.0rc2 are deliberately absent above. They were release-candidate
+     rehearsals published to TestPyPI only, never to PyPI, and their contents are folded into
+     0.1.0. A changelog is for people using the package; versions they cannot install are noise
+     to them, and the git tags remain for anyone who wants the history. -->
