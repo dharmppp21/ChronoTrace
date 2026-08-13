@@ -132,16 +132,40 @@ git commit -am "chore: 0.1.0rc1" && git push
 git tag v0.1.0rc1 && git push origin v0.1.0rc1
 ```
 
-Then verify what a stranger gets, in a throwaway environment:
+Then verify what a stranger gets, in a throwaway environment. **Install the published wheel by
+URL, not by name:**
 
 ```bash
-python -m venv /tmp/ct && /tmp/ct/bin/pip install \
-  --index-url https://test.pypi.org/simple/ \
-  --extra-index-url https://pypi.org/simple/ chronotrace
+python -m venv /tmp/ct
+/tmp/ct/bin/pip install "chronotrace[ui] @ https://test-files.pythonhosted.org/packages/.../chronotrace-VERSION-py3-none-any.whl"
 ```
 
-The `--extra-index-url` is **required**: `zstandard` and `msgpack` are not on TestPyPI, so pip
-needs real PyPI to resolve them. This is a TestPyPI quirk, not a packaging bug.
+Get that URL from `https://test.pypi.org/pypi/chronotrace/VERSION/json` (the `urls` array).
+
+**Why not the obvious `--index-url https://test.pypi.org/simple/ --extra-index-url
+https://pypi.org/simple/ chronotrace`?** Because `--index-url` makes TestPyPI the *primary*
+index for **every** dependency, and TestPyPI is a public sandbox full of unrelated packages
+squatting real names. Installing the `[ui]` extra that way fails with
+`Failed to build 'fastapi'` — pip resolves TestPyPI's junk `fastapi` in preference to the real
+one, and `--extra-index-url` does not save you, because it is a fallback rather than a
+preference. The core install happens to work only because `zstandard` and `msgpack` have no
+TestPyPI squatter.
+
+Installing by URL sidesteps the whole problem: the artifact under test comes from TestPyPI, and
+every dependency resolves from real PyPI, which is exactly the combination you want to verify.
+None of this applies to the real PyPI release, where the plain `pip install chronotrace[ui]`
+is what users run.
+
+Then check the things a wheel can be silently wrong about:
+
+```bash
+/tmp/ct/bin/chronotrace --version          # reports [ui] extra: installed
+/tmp/ct/bin/python -c "import chronotrace, pathlib; print((pathlib.Path(chronotrace.__file__).parent / '_ui' / 'index.html').is_file())"
+```
+
+That second line must print `True`. A wheel built from the sdist is API-only and will print
+`False` — `chronotrace serve` would then start and serve no UI, which is the failure mode the
+release job's packaging assertions exist to prevent.
 
 ---
 
