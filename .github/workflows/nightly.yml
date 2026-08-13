@@ -1,9 +1,10 @@
-name: Nightly property campaign
+name: Nightly
 
-# Depth on a different clock from feedback. The `ci` profile runs 40 examples on every
-# push, because a check nobody waits for is a check nobody reads; this runs 3,000, once a
-# day, where a bug that shows up in one program per thousand has room to surface. Nobody
-# is blocked on it, so it can afford to be thorough.
+# Depth on a different clock from feedback. ci.yml answers "can this merge?" in a few minutes;
+# this answers "is anything rotting?" once a day, where nobody is blocked on the result and it
+# can afford to be thorough. Day 45 moved the full OS x interpreter matrix here: PRs run a
+# three-cell covering set, and the remaining six cells run nightly, so platform coverage is
+# delayed rather than lost.
 on:
   schedule:
     - cron: "0 3 * * *"
@@ -17,6 +18,33 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # The six cells ci.yml no longer runs on every PR, plus the three it does -- the full nine.
+  # Listed as the complete matrix rather than "the leftovers" on purpose: this job is the
+  # authoritative platform statement, and it should not silently drift out of agreement with
+  # ci.yml if that file's covering set is ever re-chosen.
+  matrix:
+    name: full matrix / ${{ matrix.os }} py${{ matrix.python-version }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python-version: ["3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+      - name: Replay equivalence (the referee)
+        run: pytest tests/equivalence -q
+      - name: Tests
+        run: pytest -m "not perf"
+
   campaign:
     name: campaign / py${{ matrix.python-version }}
     runs-on: ubuntu-latest
@@ -26,14 +54,13 @@ jobs:
         # One OS, every interpreter. The campaign hunts semantic bugs in recording and
         # reconstruction, which are interpreter-dependent (generators and frame
         # finalisation differ across 3.12-3.14) and not OS-dependent -- the platform
-        # differences that matter are mmap and CRLF, which the per-push matrix already
-        # covers on all nine cells.
+        # differences that matter are mmap and CRLF, which the `matrix` job above covers.
         python-version: ["3.12", "3.13", "3.14"]
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
@@ -43,6 +70,8 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
 
+      # 3,000 examples against the per-push 40. A bug that shows up in one program per
+      # thousand has room to surface here and nowhere else.
       - name: Campaign
         run: pytest tests/property --hypothesis-profile=nightly -q
 
@@ -51,7 +80,7 @@ jobs:
       # next `pytest` replays first, rather than a bug nobody can find again.
       - name: Keep the failing examples
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: hypothesis-examples-py${{ matrix.python-version }}
           path: .hypothesis/examples
@@ -68,8 +97,8 @@ jobs:
     name: benchmark smoke (--quick)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.14"
           cache: pip
@@ -80,7 +109,11 @@ jobs:
       - name: Regenerate the quick benchmark block
         run: python -m benchmarks --quick
       - name: Archive this night's RESULTS.md
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: benchmark-results
           path: benchmarks/RESULTS.md
+
+  # The demo image is NOT built here. docker.yml owns it end to end and carries its own nightly
+  # schedule, so there is one place that knows how to build and smoke-test the image rather than
+  # two that must be kept in agreement.

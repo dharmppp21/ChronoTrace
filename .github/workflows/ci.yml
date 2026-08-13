@@ -1,12 +1,23 @@
 name: CI
 
+# Fast feedback, on every push and PR. The rule this file is organised around: a check
+# people wait for is a check people read. Anything that does not change the merge decision
+# within a few minutes belongs in nightly.yml, not here.
+#
+# Measured before the day-45 split: 13 jobs, 5.5 min wall-clock, 40.6 min of runner time.
+# The wall-clock was already fine; the waste was elsewhere. Two things changed:
+#   * lint/format/mypy ran on all nine matrix cells and computed the SAME answer nine times
+#     (see the `static` job for why that is structurally guaranteed) -- now once.
+#   * the nine-cell OS x interpreter matrix moved to a three-cell covering set here, with
+#     the full nine running nightly. Platform coverage is not lost, it is off the critical path.
 on:
   push:
     branches: [main]
   pull_request:
 
-# A PR should never be able to leak write access. Day 45 hardens this further and
-# pins actions to commit SHAs; tags are acceptable while nothing here can publish.
+# Least privilege by default: read-only, and every job below inherits it. Nothing in this
+# workflow publishes, so nothing here needs write. Release permissions live in release.yml,
+# scoped per job. A fork PR gets no secrets, and every job here runs without them by design.
 permissions:
   contents: read
 
@@ -15,27 +26,65 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Lint, format and types: ONCE, not nine times. This is safe by construction, not by luck:
+  #   * `ruff format --check` is byte-deterministic, and .gitattributes normalises line endings
+  #     in the repo, so the OS the checker runs on cannot change its answer.
+  #   * mypy is pinned to `python_version = "3.12"` in pyproject.toml, so it type-checks against
+  #     3.12 semantics no matter which interpreter executes it -- the runner's Python is
+  #     irrelevant to the result.
+  # Running these nine times bought nine identical answers. Running once buys the same signal
+  # ~90 seconds sooner on the cells that used to carry it.
+  static:
+    name: static (lint, format, types)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install
+        run: pip install -e ".[dev]"
+      - name: Lint
+        run: ruff check .
+      - name: Format
+        run: ruff format --check .
+      - name: Types
+        run: mypy
+
   test:
     name: ${{ matrix.os }} / py${{ matrix.python-version }}
     runs-on: ${{ matrix.os }}
     strategy:
-      # Never cancel the other eight cells because one failed. The whole point of
-      # the matrix is finding out WHICH platforms break, not that one did.
+      # Never cancel a sibling cell because one failed. The point of a matrix is finding out
+      # WHICH platform breaks, not that one did.
       fail-fast: false
       matrix:
-        # Windows is not optional here. It is the development machine, and it is
-        # the platform most likely to break this specific project: CRLF
-        # translation would corrupt the binary .chrono format, path separators
-        # differ, file locking is stricter (a real risk for the live tailing in
-        # Phase 5), and mmap semantics are not POSIX. If Windows only gets tested
-        # by hand, it gets tested rarely and late.
-        os: [ubuntu-latest, macos-latest, windows-latest]
-        python-version: ["3.12", "3.13", "3.14"]
+        # A three-cell covering set, not a truncation: every OS appears once and every
+        # interpreter appears once, so no platform and no Python version is unrepresented on a PR.
+        # The pairs are chosen for risk, not symmetry:
+        #   * windows x 3.14 -- Windows is the platform most likely to break THIS project (CRLF
+        #     translation would corrupt the binary .chrono format, path separators differ, file
+        #     locking is stricter for Phase 5 live tailing, mmap is not POSIX), paired with the
+        #     newest interpreter, where generator and frame-finalisation semantics moved most.
+        #   * ubuntu x 3.12 -- the floor. If it works on the oldest supported interpreter it
+        #     works above, and ubuntu is where contributors and CI consumers actually are.
+        #   * macos x 3.13 -- keeps the third OS and the middle interpreter honest.
+        # The accepted trade: a bug specific to an untested pair (say windows x 3.12) reaches
+        # main and is caught by the nightly nine-cell matrix within a day rather than at PR time.
+        # That is the deliberate price of a PR check that stays under five minutes.
+        include:
+          - os: windows-latest
+            python-version: "3.14"
+          - os: ubuntu-latest
+            python-version: "3.12"
+          - os: macos-latest
+            python-version: "3.13"
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
@@ -44,15 +93,6 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
-
-      - name: Lint
-        run: ruff check .
-
-      - name: Format
-        run: ruff format --check .
-
-      - name: Types
-        run: mypy
 
       # Run before the full suite, and separately from it. Separately, because this is
       # the only test that compares ChronoTrace against reality rather than against
@@ -78,8 +118,8 @@ jobs:
     name: perf
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.14"
           cache: pip
@@ -93,18 +133,19 @@ jobs:
   # CONTENTS are right (UI bundled, tests/spikes/benchmarks and source maps NOT), and it installs
   # and works in a container with NO compiler, NO Node, and NO pip cache. "Works on my machine" is
   # exactly the failure this catches; ten weeks of accumulated state do not exist in the container.
+  # It stays on the PR path because it is fast (~50s) and it guards the artifact users receive.
   package:
     name: package (wheel + clean install)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.12"  # the floor: if the wheel installs here, it installs above
           cache: pip
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "20"
 
@@ -125,18 +166,17 @@ jobs:
         # Every RUN in the Dockerfile is an assertion; a failed `docker build` IS the caught bug.
         run: docker build -f tests/packaging/Dockerfile.clean -t chronotrace-clean .
 
-  # The frontend (Phase 5, day 35) is built in Antigravity and lands in `frontend/`. These
-  # steps are guarded on that directory existing, so this job is green today (they skip) and
-  # enforces build + types + tests the moment the UI is committed -- a DTO change that breaks
-  # the generated client then fails the build here, not in a demo. A single Linux runner: the
+  # The frontend (Phase 5) lands in `frontend/`. These steps are guarded on that directory
+  # existing so the job degrades rather than fails on a tree without it -- a DTO change that
+  # breaks the generated client fails the build here, not in a demo. A single Linux runner: the
   # frontend is platform-independent, unlike the .chrono format the matrix above guards.
   frontend:
     name: frontend
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "20"
 
@@ -161,22 +201,21 @@ jobs:
         working-directory: frontend
 
   # End-to-end (Phase 5, day 39): the thinnest full-stack proof -- load a recording in the real
-  # UI, scrub, assert the rendered variables change. Guarded on the frontend existing, so it is
-  # green today (skips) and enforces the moment the Antigravity UI lands. The frontend project
-  # owns playwright.config.ts, whose `webServer` starts `chronotrace serve` over the ./recordings
+  # UI, scrub, assert the rendered variables change. The frontend project owns
+  # playwright.config.ts, whose `webServer` starts `chronotrace serve` over the ./recordings
   # fixture this job records below. See frontend/tests/e2e/test_scrub.spec.ts.
   e2e:
     name: e2e
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.14"
           cache: pip
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "20"
 
