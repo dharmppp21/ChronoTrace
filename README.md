@@ -6,6 +6,15 @@
      When recorded, replace this comment with the image:
      <p align="center"><img src="docs/media/hero-scrub.gif" alt="Scrubbing backward through a recording to find an aliased dict" width="800"></p> -->
 
+## Try it without installing anything
+
+```bash
+docker run --rm -p 8000:8000 ghcr.io/dharmppp21/chronotrace
+```
+
+Open <http://localhost:8000> and scrub. The image ships with the buggy pipeline below already
+recorded, so you land straight on a real bug with no Python, no Node, and nothing to set up.
+
 ## Install
 
 ```bash
@@ -20,11 +29,12 @@ Add the scrubber UI with `pipx install "chronotrace[ui]"`. [Full guide](docs/ins
 > until, 815 events before the symptom, the three regions are already the **same dict**. A bug
 > found by travelling through time, not by re-running. *(Clip #8, recorded from the UI below.)*
 
-> **Status:** the **engine is done** (`v0.4.0-query`) and the **browser tier (Phase 5) is landing** —
-> a timeline scrubber, source + execution heatmap, variables that change *backward*, a full call
-> tree, and a registry-driven query panel, all over a small local API. Recording, the durable
-> `.chrono` store, reconstruction with backward stepping, and the causal query engine all work
-> today. This README is honest about what runs and what is still being recorded for the demo.
+> **Status:** the engine, the browser tier and the published benchmarks are all done
+> (`v0.6.0-perf`), and the first release is packaged and installable. Recording, the durable
+> `.chrono` store, reconstruction with backward stepping, the causal query engine, and the
+> five-panel scrubber all work today. This README is honest about what runs; the hero clip above
+> is still being recorded, and the [changelog](CHANGELOG.md) lists the known limitations
+> in full.
 
 ## Why
 

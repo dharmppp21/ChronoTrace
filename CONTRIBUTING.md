@@ -98,6 +98,27 @@ docs: ADR-0004 chrono file format
 A day's work is several scoped commits, never one dump. Performance commits carry
 a before/after number in the message.
 
+## Releasing
+
+Cutting a release is `git tag v0.1.0 && git push origin v0.1.0`. Everything after that is
+automated — build, full test suite, tag/version assertion, PyPI upload over OIDC, the demo
+image, and the GitHub Release. The runbook, including one-time setup and how to recover when a
+step fails halfway, is [docs/releasing.md](docs/releasing.md).
+
+Before you tag:
+
+- [ ] `CHANGELOG.md` has a section for this exact version — release notes are pulled from it
+      verbatim, so a missing section ships an empty release
+- [ ] `src/chronotrace/_version.py` matches the tag, without the leading `v`
+- [ ] `main` is green
+- [ ] The shape of this release has been rehearsed against TestPyPI (tag a `rcN` version — it
+      routes to TestPyPI automatically and never moves the `latest` image tag)
+
+The one thing worth internalising: **a published version can never be replaced.** PyPI is
+immutable, so `0.1.0` is permanent the moment the `publish` job succeeds. That is why the
+pipeline runs every check it has *before* that step, and why rehearsing is a habit rather than
+a formality.
+
 ## Security
 
 A `.chrono` recording contains the full memory of the recorded program —
