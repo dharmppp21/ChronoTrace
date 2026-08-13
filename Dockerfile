@@ -44,7 +44,12 @@ COPY --from=ui /build/src/chronotrace/_ui ./src/chronotrace/_ui
 # Without this the hook would look for npm, not find it in a python image, and silently fall
 # back to "prebuilt" anyway -- setting it makes the intent explicit rather than incidental.
 ENV CHRONOTRACE_SKIP_UI_BUILD=1
-RUN pip install --no-cache-dir build && python -m build --wheel
+# Clear dist/ first. The build context legitimately carries the maintainer's dist/ (the
+# clean-install test in tests/packaging/ installs the wheel from there, so .dockerignore cannot
+# exclude it), and a stale wheel left beside the fresh one would make the glob in the runtime
+# stage ambiguous -- silently installing a months-old build. Removing it here means the wheel
+# that ships is provably the one this stage just produced.
+RUN rm -rf dist && pip install --no-cache-dir build && python -m build --wheel
 
 # ---------------------------------------------------------------------------
 # Stage 3: the image people actually run.
@@ -70,7 +75,10 @@ WORKDIR /demo
 # into the user's process; this image has the opposite job -- it is a browser demo, so the server
 # extra is the point, not a cost.
 COPY --from=builder /build/dist/*.whl /tmp/
-RUN pip install --no-cache-dir /tmp/*.whl[ui] && rm -f /tmp/*.whl
+# The wheel path is resolved into a variable before the extra is appended. Writing
+# `pip install /tmp/*.whl[ui]` looks right and is not: to the shell, `[ui]` is a glob character
+# class matching a single `u` or `i`, so the pattern silently stops matching the wheel at all.
+RUN WHEEL="$(ls /tmp/*.whl)" && pip install --no-cache-dir "${WHEEL}[ui]" && rm -f /tmp/*.whl
 
 # Bake the demo recording at BUILD time, not at start time. Recording takes a few seconds and
 # would otherwise be paid on every `docker run`, in the exact moment a first-time reader is

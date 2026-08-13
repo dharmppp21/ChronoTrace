@@ -4,16 +4,20 @@
 #
 # The correctness argument, not just the speed one: node_modules/ and .venv/ contain
 # platform-specific compiled artifacts from a Windows dev machine. Copied into a Linux image
-# they would either break the build or, worse, half-work. dist/ is excluded so the image can
-# never accidentally install a stale wheel sitting in the maintainer's tree instead of the one
-# stage 2 just built from source.
+# they would either break the build or, worse, half-work.
+#
+# NOTE: dist/ is deliberately NOT excluded here, even though a stale local wheel reaching the
+# image would be a real bug. This file applies to EVERY build using the repo root as context,
+# including `docker build -f tests/packaging/Dockerfile.clean .` -- whose entire job is to
+# install the prebuilt wheel from dist/. Excluding it here silently broke that test. The stale
+# wheel is guarded where it actually matters instead: the Dockerfile's builder stage clears
+# dist/ before building, so the wheel installed is provably the one just built.
 
 .git
 .gitattributes
 .github
 
 # Maintainer state -- never let a local build artifact reach a published image.
-dist/
 build/
 *.egg-info/
 .venv/
