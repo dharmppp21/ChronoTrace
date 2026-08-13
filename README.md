@@ -141,9 +141,13 @@ structurally cannot do, and the end of the "I put the breakpoint in the wrong pl
 again" loop.
 
 ```bash
-chronotrace query run.chrono --break pipeline.py:42            # every hit of line 42
-chronotrace query run.chrono --break pipeline.py:42 --if "i > 100"   # only where i > 100
+chronotrace query --break pipeline.py:42                 # every hit of line 42
+chronotrace query --break pipeline.py:42 --if "i > 100"  # only where i > 100
 ```
+
+Naming the recording is optional: with no path, ChronoTrace uses the newest `.chrono` in the
+current directory — the one you just made — and prints which it chose. Name it explicitly
+(`chronotrace query run.chrono --break ...`) when you mean a different one.
 
 The condition is **never `eval`'d.** It is user-supplied source, so it is parsed and walked
 by a restricted evaluator over a whitelisted grammar — no calls, imports, lambdas, or dunder

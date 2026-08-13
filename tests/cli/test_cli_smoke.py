@@ -96,3 +96,59 @@ def test_record_then_query_roundtrip(tmp_path: Path, capsys: pytest.CaptureFixtu
     assert main(["query", str(chrono), "--line-hits", f"{script}:4"]) == 0
     out = capsys.readouterr().out
     assert "bug.py:4" in out  # the accumulator line executed; the query found its instants
+
+
+def test_query_defaults_to_the_newest_recording(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`chronotrace query --watch x` with no path: the recording you just made is the one meant.
+
+    Naming the .chrono on every question was pure ceremony in the common record-then-ask loop.
+    """
+    script = tmp_path / "bug.py"
+    script.write_text(
+        "def run(n):\n    total = 0\n    for i in range(n):\n        total += i\nrun(3)\n"
+    )
+    monkeypatch.chdir(tmp_path)
+    assert main(["record", str(script)]) == 0
+    capsys.readouterr()
+
+    assert main(["query", "--watch", "total"]) == 0
+    captured = capsys.readouterr()
+    assert "total changed" in captured.out
+    # Never a silent choice: an answer about the wrong recording would look just as authoritative.
+    assert "using bug.chrono" in captured.err
+
+
+def test_query_prefers_the_most_recent_of_several(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Two recordings present: the newest wins, rather than refusing to choose.
+
+    Refusing whenever a directory holds two would disable the shortcut in exactly the directory
+    someone debugs in most.
+    """
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "old.chrono").write_bytes(b"not a real recording")
+    import os
+    import time
+
+    os.utime(tmp_path / "old.chrono", (time.time() - 3600, time.time() - 3600))
+    script = tmp_path / "new.py"
+    script.write_text("def run():\n    total = 1\n    return total\nrun()\n")
+    assert main(["record", str(script)]) == 0
+    capsys.readouterr()
+
+    assert main(["query", "--watch", "total"]) == 0
+    assert "using new.chrono" in capsys.readouterr().err
+
+
+def test_query_without_a_recording_says_what_to_do(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An empty directory is a usage error with the next command in it, not a traceback."""
+    monkeypatch.chdir(tmp_path)
+    assert main(["query", "--watch", "total"]) == 2
+    err = capsys.readouterr().err
+    assert "no .chrono recording" in err
+    assert "chronotrace record" in err  # tells them the very next thing to type

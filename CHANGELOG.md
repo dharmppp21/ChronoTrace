@@ -20,6 +20,20 @@ Entries are grouped as Added / Changed / Deprecated / Removed / Fixed / Security
 
 Nothing yet.
 
+## [0.1.1] - 2026-08-14
+
+### Added
+
+- **Queries no longer need the recording's path.** `chronotrace query --watch total` uses the
+  newest `.chrono` in the current directory — the one you just recorded — and prints which it
+  chose, so the shortcut is never silent. Name a file explicitly when you mean a different one.
+
+### Fixed
+
+- **`chronotrace record --ui` opens the scrubber.** It was opening `/docs`, the raw API
+  endpoint list, so the one-command "record it and watch in the browser" path quietly delivered
+  the wrong page. `/docs` remains the fallback for an install without the bundled UI.
+
 ## [0.1.0] - 2026-08-13
 
 The first public release: a complete, installable time-travel debugger. Everything below was
@@ -77,7 +91,8 @@ Stated here rather than discovered later:
 
 [#9]: https://github.com/dharmppp21/ChronoTrace/issues/9
 [#18]: https://github.com/dharmppp21/ChronoTrace/issues/18
-[Unreleased]: https://github.com/dharmppp21/ChronoTrace/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/dharmppp21/ChronoTrace/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/dharmppp21/ChronoTrace/releases/tag/v0.1.1
 [0.1.0]: https://github.com/dharmppp21/ChronoTrace/releases/tag/v0.1.0
 
 <!-- 0.1.0rc1 and 0.1.0rc2 are deliberately absent above. They were release-candidate

@@ -95,7 +95,11 @@ def build_parser() -> argparse.ArgumentParser:
     idx.add_argument("file", help="the .chrono file to index")
 
     qry = sub.add_parser("query", help="ask the recording a question, get jumpable instants")
-    qry.add_argument("file", nargs="?", help="the .chrono recording to query")
+    qry.add_argument(
+        "file",
+        nargs="?",
+        help="the .chrono recording to query (default: the newest one in this directory)",
+    )
     qry.add_argument("--list", action="store_true", help="list the available queries and exit")
     qry.add_argument("--var-writes", metavar="NAME", help="every write to variable NAME")
     qry.add_argument("--line-hits", metavar="FILE:LINE", help="every instant FILE:LINE executed")
@@ -402,16 +406,24 @@ def query_command(args: argparse.Namespace) -> int:
         for name, summary in registry.summaries().items():
             print(f"  {name:12s} {summary}")  # noqa: T201
         return 0
-    if not args.file:
-        print("chronotrace: query needs a .chrono file, or --list", file=sys.stderr)  # noqa: T201
+    recording = Path(args.file) if args.file else _newest_recording()
+    if recording is None:
+        print(  # noqa: T201
+            "chronotrace: no .chrono recording in this directory -- name one, "
+            "or record first: chronotrace record your_script.py",
+            file=sys.stderr,
+        )
         return 2
+    if not args.file:
+        # Say which one, on stderr so it never pollutes piped results. Silently choosing a file
+        # would be the wrong kind of convenience: the answer would look authoritative while
+        # being about a recording the user did not mean.
+        print(f"chronotrace: using {recording.name}", file=sys.stderr)  # noqa: T201
     try:
         query = _build_query(args)
     except ValueError as exc:
         print(f"chronotrace: {exc}", file=sys.stderr)  # noqa: T201
         return 2
-
-    recording = Path(args.file)
     cursor = Cursor(args.after) if args.after is not None else None
     try:
         with QueryContext.open(recording, on_progress=_report_progress) as ctx:
@@ -706,6 +718,19 @@ def _find_uvicorn() -> object | None:
     from importlib.util import find_spec
 
     return find_spec("uvicorn")
+
+
+def _newest_recording() -> Path | None:
+    """The most recently written `.chrono` in the working directory, or None if there is none.
+
+    Why "newest" rather than "the only one, else refuse": the overwhelmingly common shape is
+    record-then-ask, where the recording you mean is the one you just made. Refusing whenever a
+    directory holds two would make the shortcut useless in exactly the directory you debug in
+    most. Modification time answers "the one I just made" directly, and the caller prints which
+    file it chose, so the convenience is never silent.
+    """
+    recordings = sorted(Path().glob("*.chrono"), key=lambda p: p.stat().st_mtime, reverse=True)
+    return recordings[0] if recordings else None
 
 
 def _has_bundled_ui() -> bool:
