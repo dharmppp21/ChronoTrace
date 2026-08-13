@@ -19,7 +19,7 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 
 # 1. Non-root. A container serving HTTP to a browser has no reason to run as root, and
 #    `USER chrono` is the kind of line that silently stops working after a stage is reordered.
-uid="$(docker run --rm --user "" "$IMAGE" id -u 2>/dev/null || docker run --rm "$IMAGE" id -u)"
+uid="$(docker run --rm "$IMAGE" id -u)"
 [ "$uid" != "0" ] || fail "image runs as root (uid 0); expected the unprivileged chrono user"
 echo "ok: runs as non-root (uid $uid)"
 

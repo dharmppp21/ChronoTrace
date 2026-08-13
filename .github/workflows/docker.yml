@@ -1,0 +1,68 @@
+name: Demo image
+
+# Build and smoke-test the demo image, never push it. Publishing happens only from a tag,
+# in release.yml.
+#
+# Path-filtered on purpose. The image build is the slowest thing in this repo (npm ci, a wheel
+# build and two base images), and running it on every PR would blow the sub-five-minute budget
+# ci.yml is organised around -- for a file most PRs do not touch. A PR that DOES touch the
+# image gets it checked; everything else is covered by the nightly build, which catches the
+# other way this rots: an upstream base-image or dependency change breaking a build nobody
+# edited.
+on:
+  pull_request:
+    paths:
+      - "Dockerfile"
+      - ".dockerignore"
+      - "tests/packaging/smoke_image.sh"
+      - ".github/workflows/docker.yml"
+      # The image installs the built wheel, so anything that changes what that wheel IS
+      # changes the image -- including the frontend it bundles.
+      - "pyproject.toml"
+      - "hatch_build.py"
+      - "frontend/**"
+  push:
+    branches: [main]
+    paths:
+      - "Dockerfile"
+      - ".dockerignore"
+      - "tests/packaging/smoke_image.sh"
+      - ".github/workflows/docker.yml"
+      - "pyproject.toml"
+      - "hatch_build.py"
+      - "frontend/**"
+  # Nightly, because the path filters above only catch the ways WE break the image. The other
+  # way it rots is upstream: a base image or an npm dependency changing under a Dockerfile
+  # nobody edited. This workflow owns the image entirely -- nightly.yml deliberately does not
+  # build it, so there is exactly one definition of "build and smoke-test the demo".
+  schedule:
+    - cron: "30 3 * * *"
+  workflow_dispatch:
+
+# Read-only: this workflow deliberately has no push rights. A fork PR runs it with no secrets
+# and still gets the full signal, because building and smoke-testing an image needs neither.
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  image:
+    name: build + smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Build
+        run: docker build -t chronotrace-demo .
+
+      - name: Report the image size
+        # Surfaced rather than asserted. A size threshold here would be a number nobody chose
+        # on purpose; what is useful is seeing it move in a PR that made it move.
+        run: |
+          docker image inspect chronotrace-demo --format 'demo image size {{.Size}} bytes'
+
+      - name: Smoke-test
+        run: ./tests/packaging/smoke_image.sh chronotrace-demo

@@ -1,0 +1,48 @@
+# Keep the build context small and, more importantly, HERMETIC. Everything excluded here is
+# either maintainer state that must not influence a published image, or bulk that only slows
+# the upload of the context to the daemon.
+#
+# The correctness argument, not just the speed one: node_modules/ and .venv/ contain
+# platform-specific compiled artifacts from a Windows dev machine. Copied into a Linux image
+# they would either break the build or, worse, half-work. dist/ is excluded so the image can
+# never accidentally install a stale wheel sitting in the maintainer's tree instead of the one
+# stage 2 just built from source.
+
+.git
+.gitattributes
+.github
+
+# Maintainer state -- never let a local build artifact reach a published image.
+dist/
+build/
+*.egg-info/
+.venv/
+venv/
+frontend/node_modules/
+frontend/dist/
+src/chronotrace/_ui/
+__pycache__/
+**/__pycache__/
+*.py[cod]
+
+# Caches: large, machine-specific, and meaningless in the image.
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.hypothesis/
+.coverage
+htmlcov/
+
+# Recordings are somebody's program memory. They have no business in a public image, and the
+# demo recording is generated during the build from examples/ instead.
+recordings/
+*.chrono
+*.chrono.idx
+
+# Not needed to build or run the demo.
+docs/
+spikes/
+benchmarks/
+flamegraphs/
+tests/e2e/
+frontend/tests/
