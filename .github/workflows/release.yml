@@ -1,0 +1,258 @@
+name: Release
+
+# One tag, one release. `git tag v0.1.0 && git push --tags` builds, verifies, publishes to
+# PyPI, pushes the demo image and writes the GitHub Release -- with no human step in between.
+# The runbook, including what to do when a step fails halfway, is docs/releasing.md.
+#
+# PyPI or TestPyPI is decided by the VERSION ITSELF, not by a separate switch: a PEP 440
+# pre-release (0.1.0rc1) goes to TestPyPI and is marked a GitHub pre-release; a final version
+# (0.1.0) goes to PyPI. One mechanism, and the rehearsal runs the same code path as the real
+# thing -- a dry run that takes a different branch is not a rehearsal.
+on:
+  push:
+    tags: ["v*"]
+
+# Read-only at the top. Every job that needs more asks for exactly what it needs and no more,
+# so a compromised step in `build` cannot publish and a compromised step in `image` cannot
+# write to the repo. This is the reason the permissions are not hoisted up here.
+permissions:
+  contents: read
+
+# Never cancel a release in flight. Cancelling halfway through is precisely how you get the
+# partially-published state docs/releasing.md exists to recover from.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # The gate. Nothing is built, and certainly nothing published, until the tag and the package
+  # agree. A tag/version mismatch is the classic broken release: v0.2.0 on PyPI containing
+  # 0.1.0's code, discovered by a user. This can only catch a real mistake because the two are
+  # INDEPENDENT sources -- src/chronotrace/_version.py holds a literal rather than deriving
+  # itself from git, exactly so this comparison is not a tautology (see that file's docstring).
+  guard:
+    name: guard (tag matches version)
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+      prerelease: ${{ steps.check.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - id: check
+        name: Assert the tag matches the package version
+        # Deliberately plain shell: no pip install, nothing to resolve, so the gate cannot
+        # itself fail for an unrelated reason and leave the real check unrun.
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME#v}"
+          # Read the literal without installing anything: _version.py imports nothing, so a
+          # plain path insert is enough and cannot be confused by an already-installed copy.
+          VERSION="$(python -c "import sys; sys.path.insert(0, 'src'); from chronotrace._version import __version__; print(__version__)")"
+          echo "tag=$TAG package=$VERSION"
+          if [ "$TAG" != "$VERSION" ]; then
+            echo "::error::Tag v$TAG does not match package version $VERSION. Fix src/chronotrace/_version.py (or the tag) and try again -- nothing was published."
+            exit 1
+          fi
+          # PEP 440 spells a pre-release as an a/b/rc segment, and a development release as
+          # .devN -- both must rehearse against TestPyPI rather than burn a real version. A
+          # grep is enough here and avoids depending on `packaging` being present on the runner
+          # just to ask one question. `.postN` is deliberately NOT matched: a post-release is a
+          # final release and belongs on PyPI.
+          if printf '%s' "$VERSION" | grep -Eq '((a|b|rc)[0-9]+|\.dev[0-9]+)$'; then
+            PRERELEASE=true
+          else
+            PRERELEASE=false
+          fi
+          echo "prerelease=$PRERELEASE"
+          {
+            echo "version=$VERSION"
+            echo "prerelease=$PRERELEASE"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Refuse to re-release a version already on the index
+        # PyPI is immutable: a version can never be re-uploaded, and the upload step would fail
+        # late -- after the build, and possibly after the image was pushed. Checking here turns
+        # that into an immediate, readable failure. `|| true` because a 404 (never published)
+        # is the SUCCESS case for a new release.
+        run: |
+          set -euo pipefail
+          V="${{ steps.check.outputs.version }}"
+          if [ "${{ steps.check.outputs.prerelease }}" = "true" ]; then
+            INDEX="https://test.pypi.org/pypi/chronotrace/$V/json"
+          else
+            INDEX="https://pypi.org/pypi/chronotrace/$V/json"
+          fi
+          CODE="$(curl -s -o /dev/null -w '%{http_code}' "$INDEX" || true)"
+          if [ "$CODE" = "200" ]; then
+            echo "::error::chronotrace $V is already published at $INDEX. Indexes are immutable -- bump the version and tag again."
+            exit 1
+          fi
+          echo "version $V is free on the target index (HTTP $CODE)"
+
+  # Build once, publish that exact artifact everywhere. Rebuilding per job would mean the wheel
+  # on PyPI and the wheel in the GitHub Release were separately produced -- byte-identical if
+  # everything goes right, and impossible to reason about when it does not.
+  build:
+    name: build (wheel, sdist, SBOM)
+    needs: guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "20"
+
+      - name: Full test suite before anything leaves this machine
+        run: |
+          pip install -e ".[dev]"
+          pytest -m "not perf"
+
+      - name: Build
+        run: |
+          python -m pip install --upgrade build twine
+          python -m build
+          python -m twine check dist/*
+
+      # An SBOM because of what this package IS. ChronoTrace is imported into the user's process
+      # and reads their program's memory; asking someone to `pip install` that carries an unusually
+      # high duty of care. A machine-readable dependency inventory is what lets them (or their
+      # security team) answer "does this pull in the thing that was just disclosed?" without
+      # trusting a README. CycloneDX via a pip package rather than a third-party action: one less
+      # actor in the release pipeline, and it runs against the ACTUAL resolved install.
+      - name: Generate the SBOM from a real install of the built wheel
+        run: |
+          python -m venv /tmp/sbomenv
+          /tmp/sbomenv/bin/pip install --quiet dist/*.whl
+          pip install --quiet cyclonedx-bom
+          cyclonedx-py environment /tmp/sbomenv --output-format JSON --outfile dist/sbom.cdx.json
+          test -s dist/sbom.cdx.json
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  # Trusted Publishing (OIDC). GitHub mints a short-lived token for THIS repo and THIS workflow,
+  # and PyPI exchanges it for upload rights it grants only to that identity. The point is what
+  # is NOT here: no long-lived API token in repository secrets, so there is nothing to leak,
+  # rotate, or accidentally print. `id-token: write` is the permission to request that token --
+  # it grants nothing else, and it is scoped to this job alone.
+  publish:
+    name: publish (${{ needs.guard.outputs.prerelease == 'true' && 'TestPyPI' || 'PyPI' }})
+    needs: [guard, build]
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+    # The environment name is half of the trusted-publisher identity on the index side; the
+    # publisher is configured to accept only this workflow running in this environment.
+    environment: ${{ needs.guard.outputs.prerelease == 'true' && 'testpypi' || 'pypi' }}
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: dist
+          path: dist/
+
+      # The SBOM is a release asset, not a distribution file. twine would reject the upload.
+      - name: Keep only distribution files
+        run: rm -f dist/sbom.cdx.json
+
+      - name: Publish
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        with:
+          # Always an explicit URL. Letting this fall back to a default would mean the
+          # rehearsal and the real release differ by an unset value, which is the kind of
+          # difference that is invisible until it publishes to the wrong index.
+          repository-url: ${{ needs.guard.outputs.prerelease == 'true' && 'https://test.pypi.org/legacy/' || 'https://upload.pypi.org/legacy/' }}
+
+  # The demo image. Pushed AFTER PyPI on purpose: a registry tag can be overwritten, a PyPI
+  # version cannot, so the irreversible step goes first and the recoverable one follows. If
+  # this job fails the release is still valid -- see docs/releasing.md for pushing the image
+  # on its own.
+  image:
+    name: image (build, smoke, push)
+    needs: [guard, publish]
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Build
+        run: docker build -t chronotrace-demo .
+
+      # Smoke-test BEFORE pushing. A published image that starts and serves nothing is worse
+      # than no image: the README promises one command, and the reader has no way to debug it.
+      - name: Smoke-test
+        run: ./tests/packaging/smoke_image.sh chronotrace-demo
+
+      - name: Push to GHCR
+        # docker login + push directly, rather than the docker/* actions: one fewer third-party
+        # action in a pipeline that has publish rights, and GITHUB_TOKEN already authenticates
+        # to GHCR. `latest` moves only for a final release, so a pre-release rehearsal can never
+        # change what `docker run ghcr.io/.../chronotrace` gives a first-time reader.
+        run: |
+          set -euo pipefail
+          IMAGE="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/chronotrace"
+          V="${{ needs.guard.outputs.version }}"
+          echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker tag chronotrace-demo "$IMAGE:$V"
+          docker push "$IMAGE:$V"
+          if [ "${{ needs.guard.outputs.prerelease }}" != "true" ]; then
+            docker tag chronotrace-demo "$IMAGE:latest"
+            docker push "$IMAGE:latest"
+          fi
+
+  # The GitHub Release, last, so it only ever describes a release that actually happened.
+  # `gh` is preinstalled on the runner, so this needs no third-party action at all.
+  github-release:
+    name: github release
+    needs: [guard, publish]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: dist
+          path: dist/
+
+      # Notes come from the hand-written CHANGELOG section for this version, not from commit
+      # subjects. See CHANGELOG.md's header for why: commits are written for the people
+      # changing the code, release notes for the people using it.
+      - name: Extract this version's notes from the changelog
+        run: |
+          python - <<'PY'
+          import os, pathlib, re
+          version = os.environ["VERSION"]
+          text = pathlib.Path("CHANGELOG.md").read_text(encoding="utf-8")
+          # Sections are '## [x.y.z] - date'; take this one, stop at the next '## '.
+          m = re.search(rf"^## \[{re.escape(version)}\].*?$(.*?)(?=^## |\Z)", text, re.S | re.M)
+          notes = m.group(1).strip() if m else f"See CHANGELOG.md for {version}."
+          pathlib.Path("notes.md").write_text(notes + "\n", encoding="utf-8")
+          print(notes[:400])
+          PY
+        env:
+          VERSION: ${{ needs.guard.outputs.version }}
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        # --verify-tag refuses to invent a tag that does not exist; the artifacts attached are
+        # the same bytes that were published, plus the SBOM.
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "ChronoTrace ${GITHUB_REF_NAME}" \
+            --notes-file notes.md \
+            --verify-tag \
+            ${{ needs.guard.outputs.prerelease == 'true' && '--prerelease' || '' }} \
+            dist/*

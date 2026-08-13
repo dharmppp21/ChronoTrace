@@ -1,0 +1,51 @@
+# Pinning without updating is just an old version with extra steps.
+#
+# Every GitHub Action in this repo is pinned to a commit SHA (see the release.yml header for
+# the attack that prevents). A SHA never moves, which is the point -- and also means a pinned
+# action never gets a security fix unless something proposes the bump. That something is this
+# file. Dependabot understands the `# v5` comment next to each SHA and rewrites both together.
+version: 2
+
+updates:
+  # The release pipeline has publish rights, so a compromised or simply stale action here is
+  # the highest-value thing in the repo to keep current.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      # One PR for routine action bumps rather than five. Batching is safe here because these
+      # are reviewed as a set against the release pipeline anyway, and five separate PRs is how
+      # dependency updates start getting rubber-stamped.
+      actions:
+        patterns: ["*"]
+
+  # The Dockerfile's base image is digest-pinned for reproducibility; this is what stops that
+  # from meaning "frozen on an image with known CVEs".
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+
+  # Python dependencies. Note what this does NOT do: the runtime deps (zstandard, msgpack) are
+  # declared with lower bounds, not pins, because the recorder is imported into the user's
+  # process and pinning there would force a resolver conflict onto THEIR project. So this
+  # mostly watches the dev toolchain -- which is where a supply-chain problem would reach the
+  # release pipeline anyway.
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      dev:
+        patterns: ["*"]
+
+  # The frontend is built into the wheel, so its dependency tree ships to users inside the
+  # published artifact. It is not "just a dev dependency".
+  - package-ecosystem: npm
+    directory: /frontend
+    schedule:
+      interval: weekly
+    groups:
+      frontend:
+        patterns: ["*"]
