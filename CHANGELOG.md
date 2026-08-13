@@ -20,6 +20,21 @@ Entries are grouped as Added / Changed / Deprecated / Removed / Fixed / Security
 
 Nothing yet.
 
+## [0.1.0rc2] - 2026-08-13
+
+### Fixed
+
+- **Queries find your file however you spelled its path.** On Windows,
+  `chronotrace query run.chrono --break C:/proj/app.py:42` reported
+  `no file matching` because the recording had interned the path with backslashes. Separator
+  and letter case no longer decide whether your file is found. POSIX paths stay
+  case-sensitive, as they should be.
+
+### Changed
+
+- The demo image now runs on Python 3.14, and its dependencies, build toolchain and CI actions
+  were updated. No behaviour change for users of the package.
+
 ## [0.1.0rc1] - 2026-08-13
 
 The first published release candidate: a complete, installable time-travel debugger. Everything
@@ -72,5 +87,6 @@ Stated here rather than discovered later:
 
 [#9]: https://github.com/dharmppp21/ChronoTrace/issues/9
 [#18]: https://github.com/dharmppp21/ChronoTrace/issues/18
-[Unreleased]: https://github.com/dharmppp21/ChronoTrace/compare/v0.1.0rc1...HEAD
+[Unreleased]: https://github.com/dharmppp21/ChronoTrace/compare/v0.1.0rc2...HEAD
+[0.1.0rc2]: https://github.com/dharmppp21/ChronoTrace/releases/tag/v0.1.0rc2
 [0.1.0rc1]: https://github.com/dharmppp21/ChronoTrace/releases/tag/v0.1.0rc1

@@ -11,4 +11,4 @@ sources. Derive one from the other and the assertion becomes a tautology that
 passes unconditionally.
 """
 
-__version__ = "0.1.0rc1"
+__version__ = "0.1.0rc2"
