@@ -131,7 +131,7 @@ jobs:
           python -m venv /tmp/sbomenv
           /tmp/sbomenv/bin/pip install --quiet dist/*.whl
           pip install --quiet cyclonedx-bom
-          cyclonedx-py environment /tmp/sbomenv --output-format JSON --outfile dist/sbom.cdx.json
+          cyclonedx-py environment /tmp/sbomenv --output-format JSON --output-file dist/sbom.cdx.json
           test -s dist/sbom.cdx.json
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
