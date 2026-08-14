@@ -98,6 +98,31 @@ def test_record_then_query_roundtrip(tmp_path: Path, capsys: pytest.CaptureFixtu
     assert "bug.py:4" in out  # the accumulator line executed; the query found its instants
 
 
+def test_a_crashing_script_still_leaves_a_recording(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The run you most need to scrub is the one that died.
+
+    The target's exception used to propagate out of `record_script`, so the write never
+    happened and the recording was discarded at exactly the moment it mattered -- the primary
+    use case of a time-travel debugger, losing its data.
+    """
+    script = tmp_path / "boom.py"
+    script.write_text("def f(x):\n    return int(x)\nf('')\n")
+    monkeypatch.chdir(tmp_path)
+
+    assert main(["record", str(script)]) == 1, "a crashed target is a non-zero exit"
+    chrono = tmp_path / "boom.chrono"
+    assert chrono.exists() and chrono.stat().st_size > 0, "the recording must survive the crash"
+
+    err = capsys.readouterr().err
+    assert "ValueError" in err  # the crash is reported, not swallowed
+    assert "--exception-origin" in err  # and it names the next command to run
+
+    # And the survivor is actually usable, not just present.
+    assert main(["query", "boom.chrono", "--watch", "x"]) == 0
+
+
 def test_query_defaults_to_the_newest_recording(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import traceback
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -173,7 +174,7 @@ def _print_version() -> None:
 
 def record_script(
     script: str, script_args: list[str], config: RecorderConfig, sink: Sink
-) -> Recorder:
+) -> tuple[Recorder, Exception | None]:
     """Execute `script` as `__main__` under the recorder, into `sink`.
 
     Scope defaults to the script's own directory when the config names no roots,
@@ -187,8 +188,14 @@ def record_script(
         sink: where events are written.
 
     Returns:
-        The recorder, for its intern tables and value pool -- what `intern_tables` turns
-        into the recording's own STRINGS section.
+        `(recorder, failure)` -- the recorder for its intern tables and value pool (what
+        `intern_tables` turns into the recording's own STRINGS section), and the exception the
+        target raised, or None if it ran to completion.
+
+        The failure is RETURNED rather than propagated because a program that crashed is the
+        single most valuable thing to have recorded, and letting the exception escape here
+        skipped the write and threw the recording away at exactly that moment. The caller saves
+        the recording first, then reports the crash.
 
     Complexity: dominated by running the target program.
     """
@@ -208,12 +215,18 @@ def record_script(
     )
     saved_argv = sys.argv
     sys.argv = [str(script_path), *script_args]
+    failure: Exception | None = None
     try:
         with recorder:
             runpy.run_path(str(script_path), run_name="__main__")
+    except Exception as exc:  # the TARGET's error, captured so the recording survives it
+        # Deliberately `Exception`, not `BaseException`: SystemExit and KeyboardInterrupt are
+        # deliberate control flow, not the crash this tool exists to explain, and swallowing
+        # them here would make Ctrl-C feel broken.
+        failure = exc
     finally:
         sys.argv = saved_argv
-    return recorder
+    return recorder, failure
 
 
 def repair_recording(path: str, out: str | None) -> int:
@@ -273,7 +286,13 @@ def step_command(args: argparse.Namespace) -> int:
 
     config = load_config(pyproject=find_pyproject(), env=os.environ, cli={})
     sink = MemorySink()
-    recorder = record_script(str(target), args.script_args, config, sink)
+    recorder, failure = record_script(str(target), args.script_args, config, sink)
+    if failure is not None:
+        # Stepping a script that crashed is a legitimate thing to want -- show the crash, then
+        # open the session anyway so the user can walk back from it.
+        traceback.print_exception(failure)
+        msg = f"\nchronotrace: {type(failure).__name__} -- stepping the recording."
+        print(msg, file=sys.stderr)  # noqa: T201
     if not sink.events:
         print(  # noqa: T201
             "chronotrace: nothing was recorded -- the scope may exclude all of your code.",
@@ -634,7 +653,7 @@ def record_command(args: argparse.Namespace) -> int:
     if args.ui:
         return record_ui(args, config, out)
     sink = MemorySink()
-    recorder = record_script(args.script, args.script_args, config, sink)
+    recorder, failure = record_script(args.script, args.script_args, config, sink)
 
     count = len(sink.events)
     if count == 0:
@@ -644,9 +663,20 @@ def record_command(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 0
+    # Save BEFORE reporting the crash. A program that died is the one you most need to scrub.
     out.write_bytes(_to_chrono(recorder, sink))
     print(f"chronotrace: recorded {count:,} events from {args.script} -> {out}")  # noqa: T201
-    return index_command(str(out)) if args.index else 0
+    status = index_command(str(out)) if args.index else 0
+    if failure is not None:
+        traceback.print_exception(failure)
+        print(  # noqa: T201
+            f"\nchronotrace: {type(failure).__name__} -- the recording was still saved. "
+            f"Find where it started with:\n"
+            f"  chronotrace query {out.name} --exception-origin {count - 1}",
+            file=sys.stderr,
+        )
+        return 1
+    return status
 
 
 def record_ui(args: argparse.Namespace, config: RecorderConfig, out: Path) -> int:
@@ -707,8 +737,12 @@ def record_ui(args: argparse.Namespace, config: RecorderConfig, out: Path) -> in
             f"chronotrace: recording live -> {out} (session {out.stem!r}); watch at {landing}"
         )
         webbrowser.open(landing)
-        recorder = record_script(args.script, args.script_args, config, sink)
+        recorder, failure = record_script(args.script, args.script_args, config, sink)
+        # Finalise either way: a crashed run still has a value pool and name tables, and
+        # without them the recording on disk is unscrubbable -- losing the crash we recorded.
         sink.finalize(recorder.values, intern_tables(recorder))
+        if failure is not None:
+            traceback.print_exception(failure)
         print(  # noqa: T201
             f"chronotrace: recording complete -> {out}. Scrub it at {base}; Ctrl-C to stop serving."
         )
