@@ -74,7 +74,7 @@ function createCallNode(frame: CallFrame, indent: number): HTMLElement {
   row.innerHTML = `
     ${caret}
     <span style="font-weight:600;margin-right:8px;">${escapeHtml(frame.function)}</span>
-    <span style="color:var(--text-muted);font-size:0.75rem;">${escapeHtml(frame.file.split('/').pop() || frame.file)}</span>
+    <span style="color:var(--text-muted);font-size:0.75rem;">${escapeHtml(frame.file.split(/[\\/]/).pop() || frame.file)}</span>
     <span class="${exitClass}" style="font-size:0.75rem;margin-left:4px;">${exitLabel}</span>
   `;
 

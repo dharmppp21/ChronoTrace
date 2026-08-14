@@ -292,8 +292,11 @@ main#panels {
   z-index: 100;
 }
 
-#empty-state.hidden, #help-overlay.hidden, #error-dialog.hidden {
-  display: none;
+/* A utility, not three special cases. It was scoped to these three ids, so every other
+   element toggling .hidden -- the query panel's Load More button -- stayed visible, and a
+   button that should not have been clickable yet was. */
+.hidden {
+  display: none !important;
 }
 
 .empty-message, .help-content, .error-content {

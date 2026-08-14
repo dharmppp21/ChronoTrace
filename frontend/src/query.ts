@@ -105,19 +105,39 @@ async function runQuery(loadMore: boolean) {
   const desc = descriptors.find(d => d.name === queryName);
   if (!desc) return;
   const args: Record<string, any> = {};
+  const problems: string[] = [];
   for (const arg of desc.args) {
     const input = document.getElementById(`query-arg-${arg.name}`) as HTMLInputElement;
-    if (input && input.value) {
-      // Basic type parsing
-      if (arg.type === 'integer') {
-        args[arg.name] = parseInt(input.value, 10);
-      } else if (arg.type === 'boolean') {
-        args[arg.name] = input.value.toLowerCase() === 'true';
-      } else {
-        args[arg.name] = input.value;
-      }
+    const raw = input?.value.trim() ?? '';
+    if (!raw) {
+      if (arg.required) problems.push(`${arg.name} is required`);
+      continue;
+    }
+    if (arg.type === 'integer') {
+      // parseInt('abc') is NaN, which serialises to null and comes back as a server-side
+      // type error about a field the user can see is wrong. Say so here instead.
+      const n = parseInt(raw, 10);
+      if (Number.isNaN(n)) problems.push(`${arg.name} must be a number`);
+      else args[arg.name] = n;
+    } else if (arg.type === 'boolean') {
+      args[arg.name] = raw.toLowerCase() === 'true';
+    } else {
+      args[arg.name] = raw;
     }
   }
+
+  // The form already knows which arguments are required and what type they are, so a round
+  // trip to be told "body.name: Input should be a valid string" helps nobody.
+  if (problems.length > 0) {
+    document.getElementById('query-error')!.textContent = problems.join(' · ');
+    if (!loadMore) document.getElementById('query-results')!.innerHTML = '';
+    return;
+  }
+
+  // Paging can only continue a query that already ran. Without this, a "Load More" click
+  // before any query sends name: null and the server answers with a validation string that
+  // means nothing to the user.
+  if (loadMore && !currentQueryName) return;
 
   if (!loadMore) {
     currentCursor = null;
@@ -194,9 +214,16 @@ function renderResults(hits: QueryHit[], append: boolean, partial: boolean) {
     row.style.background = 'var(--bg-color)';
     row.style.fontSize = '0.8rem';
     
+    // Split on BOTH separators: recordings intern whatever __file__ held, so a Windows path
+    // arrives with backslashes and split('/') returns it whole -- the row then shows an
+    // absolute path where a filename belongs. And `function` is null for queries that answer
+    // about a line rather than a frame, which rendered as the literal text "in null".
+    const where = hit.file
+      ? `${hit.file.split(/[\\/]/).pop()}:${hit.lineno}${hit.function ? ` in ${hit.function}` : ''}`
+      : '';
     row.innerHTML = `
       <div style="color:var(--accent);font-weight:600;">Seq: ${hit.seq}</div>
-      ${hit.file ? `<div style="color:var(--text-muted);">${hit.file.split('/').pop()}:${hit.lineno} in ${hit.function}</div>` : ''}
+      ${where ? `<div style="color:var(--text-muted);">${escapeHtml(where)}</div>` : ''}
       ${hit.value_preview ? `<div style="color:#a7f3d0;font-family:var(--code-font);">${escapeHtml(hit.value_preview)}</div>` : ''}
       ${hit.note ? `<div style="color:var(--color-modified);">${escapeHtml(hit.note)}</div>` : ''}
     `;
