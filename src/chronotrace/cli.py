@@ -638,6 +638,18 @@ def record_command(args: argparse.Namespace) -> int:
     from chronotrace.config import find_pyproject, load_config
     from chronotrace.recorder import MemorySink
 
+    # Check the script exists before doing anything else. A mistyped path used to run the whole
+    # machinery and then report "nothing was recorded -- try --include", which sends someone
+    # debugging their scope configuration when they actually typed `example/` for `examples/`.
+    script_path = Path(args.script)
+    if not script_path.is_file():
+        hint = ""
+        sibling = script_path.parent.parent / f"{script_path.parent.name}s" / script_path.name
+        if sibling.is_file():  # the classic examples/ vs example/ slip
+            hint = f" Did you mean {sibling}?"
+        print(f"chronotrace: no such script: {args.script}.{hint}", file=sys.stderr)  # noqa: T201
+        return 2
+
     config = load_config(
         pyproject=find_pyproject(),
         env=os.environ,
@@ -657,6 +669,19 @@ def record_command(args: argparse.Namespace) -> int:
 
     count = len(sink.events)
     if count == 0:
+        # A failure here means the program died before a single event was recorded -- an import
+        # error, a syntax error, a crash at module scope. Reporting "nothing was recorded, try
+        # --include" would blame the scope for what is really a broken program, and hide the
+        # traceback that explains it. There is no recording to save, so this returns early.
+        if failure is not None:
+            sys.stdout.flush()
+            traceback.print_exception(failure)
+            print(  # noqa: T201
+                f"\nchronotrace: {type(failure).__name__} -- the program failed before any "
+                "code could be recorded, so there is nothing to scrub.",
+                file=sys.stderr,
+            )
+            return 1
         print(  # noqa: T201
             "chronotrace: warning -- nothing was recorded. The scope may exclude "
             "all of your code; try --include.",

@@ -122,6 +122,36 @@ def test_a_crashing_script_still_leaves_a_recording(
     assert main(["query", "boom.chrono", "--watch", "x"]) == 0
 
 
+def test_a_mistyped_script_path_says_so(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """A wrong path is a wrong path, not a scope problem.
+
+    It used to run the whole machinery and report 'nothing was recorded -- try --include',
+    which sends someone to debug their scope configuration over a typo.
+    """
+    assert main(["record", str(tmp_path / "does_not_exist.py")]) == 2
+    err = capsys.readouterr().err
+    assert "no such script" in err
+    assert "--include" not in err  # the old, misleading advice
+
+
+def test_a_failure_before_any_event_is_reported_not_blamed_on_scope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A syntax error records zero events -- and must still surface, not read as a scope issue.
+
+    Capturing the target's exception (so crashed runs keep their recording) made the
+    zero-event branch swallow it: the user saw 'try --include' where a SyntaxError belonged.
+    """
+    script = tmp_path / "bad.py"
+    script.write_text("def broken(:\n    pass\n")
+    monkeypatch.chdir(tmp_path)
+
+    assert main(["record", str(script)]) == 1
+    err = capsys.readouterr().err
+    assert "SyntaxError" in err
+    assert "--include" not in err
+
+
 def test_a_crash_reports_where_the_exception_was_born(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
