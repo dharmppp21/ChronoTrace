@@ -674,6 +674,22 @@ def record_ui(args: argparse.Namespace, config: RecorderConfig, out: Path) -> in
             file=sys.stderr,
         )
         return 1
+    # Claim the output file BEFORE starting the server, not after. The server is pointed at the
+    # whole directory, so if a recording of this name already exists it may be memory-mapped the
+    # moment the browser asks for the session list -- and on Windows a mapped file cannot then be
+    # reopened for writing, which surfaced as `OSError: [Errno 22] Invalid argument`. Opening
+    # first means the writer owns the file and the server only ever sees it afterwards.
+    try:
+        sink = StreamingFileSink(out)
+    except OSError as exc:
+        print(  # noqa: T201
+            f"chronotrace: cannot write {out}: {exc.strerror or exc}. "
+            "Another `chronotrace serve` may still be holding this recording open -- "
+            "stop it (Ctrl-C) or record to a different path with --out.",
+            file=sys.stderr,
+        )
+        return 1
+
     serve = [sys.executable, "-m", "chronotrace.cli", "serve", "--dir", str(out.parent)]
     serve += ["--port", str(args.port)]
     server = subprocess.Popen(serve)  # noqa: S603 -- our own CLI, fixed args, no shell
@@ -681,7 +697,6 @@ def record_ui(args: argparse.Namespace, config: RecorderConfig, out: Path) -> in
         if not _wait_for_port(args.port):
             print("chronotrace: the live server did not start in time", file=sys.stderr)  # noqa: T201
             return 1
-        sink = StreamingFileSink(out)  # creates the file, so the session exists before the browser
         base = f"http://127.0.0.1:{args.port}"
         # Open the scrubber, not the API explorer. `_mount_ui` serves the built SPA at `/` when
         # the wheel carries one, so ask the same question it does and land the user on the thing
