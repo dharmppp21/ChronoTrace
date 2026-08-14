@@ -117,10 +117,36 @@ def test_a_crashing_script_still_leaves_a_recording(
 
     err = capsys.readouterr().err
     assert "ValueError" in err  # the crash is reported, not swallowed
-    assert "--exception-origin" in err  # and it names the next command to run
 
     # And the survivor is actually usable, not just present.
     assert main(["query", "boom.chrono", "--watch", "x"]) == 0
+
+
+def test_a_crash_reports_where_the_exception_was_born(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Recording a program that dies should SHOW the origin, not print a command to go run.
+
+    Python's traceback already says where the exception surfaced. What the recording uniquely
+    knows is where it was born -- the deepest frame, which for a chained exception can be far
+    from the reported one -- so the whole point is answering that without being asked.
+    """
+    script = tmp_path / "deep.py"
+    script.write_text(
+        "def inner(q):\n"
+        "    return int(q)\n"
+        "def outer(rows):\n"
+        "    return [inner(r) for r in rows]\n"
+        "outer(['1', ''])\n"
+    )
+    monkeypatch.chdir(tmp_path)
+
+    assert main(["record", str(script)]) == 1
+    err = capsys.readouterr().err
+    assert "where it came from" in err
+    assert "born here" in err, err
+    assert "deep.py" in err
+    assert "chronotrace step" in err  # the next move, not a query to retype
 
 
 def test_query_defaults_to_the_newest_recording(

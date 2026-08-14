@@ -668,15 +668,54 @@ def record_command(args: argparse.Namespace) -> int:
     print(f"chronotrace: recorded {count:,} events from {args.script} -> {out}")  # noqa: T201
     status = index_command(str(out)) if args.index else 0
     if failure is not None:
+        # stdout is block-buffered when piped while stderr is not, so without this the crash
+        # report jumps ahead of the "recorded N events" line and reads out of order.
+        sys.stdout.flush()
         traceback.print_exception(failure)
-        print(  # noqa: T201
-            f"\nchronotrace: {type(failure).__name__} -- the recording was still saved. "
-            f"Find where it started with:\n"
-            f"  chronotrace query {out.name} --exception-origin {count - 1}",
-            file=sys.stderr,
-        )
+        _report_crash(out, count - 1, failure, indexed=bool(args.index))
         return 1
     return status
+
+
+def _report_crash(recording: Path, last_seq: int, failure: Exception, *, indexed: bool) -> None:
+    """After a crash, say where the exception was BORN -- do not hand the user a command to run.
+
+    Python already told them where it surfaced; the traceback's last frame is the symptom. What
+    a recording uniquely knows is where the exception came into existence and what caused it,
+    which for a chained exception can be far from where it was reported. Printing a query for
+    the user to copy would be making them ask for the one thing they obviously want.
+
+    Best-effort by construction: a crash report must never itself raise, and a recording whose
+    index cannot be built should still leave the user with Python's traceback rather than a
+    second failure on top of the first. Skipped entirely with --no-index, where answering would
+    mean building an index the user asked us not to build.
+    """
+    name = type(failure).__name__
+    if not indexed:
+        print(  # noqa: T201
+            f"\nchronotrace: {name} -- recording saved to {recording.name} (not indexed).\n"
+            f"  chronotrace query {recording.name} --exception-origin {last_seq}",
+            file=sys.stderr,
+        )
+        return
+
+    from chronotrace.query import ExceptionOriginQuery, QueryContext
+
+    try:
+        with QueryContext.open(recording) as ctx:
+            hits = ExceptionOriginQuery(last_seq).execute(ctx).hits
+    except Exception:  # a failed explanation must never replace the real failure
+        hits = ()
+
+    print(f"\nchronotrace: {name} -- recording saved to {recording.name}", file=sys.stderr)  # noqa: T201
+    if hits:
+        print("chronotrace: where it came from --", file=sys.stderr)  # noqa: T201
+        for hit in hits:
+            print(f"  {_format_hit(hit)}", file=sys.stderr)  # noqa: T201
+    print(  # noqa: T201
+        f"chronotrace: step back through it with:  chronotrace step {recording.name}",
+        file=sys.stderr,
+    )
 
 
 def record_ui(args: argparse.Namespace, config: RecorderConfig, out: Path) -> int:
