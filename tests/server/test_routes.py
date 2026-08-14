@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import os
 import threading
 import time
 from collections.abc import Callable
@@ -75,6 +76,22 @@ def test_list_sessions(client: TestClient, session_id: str) -> None:
     row = next(r for r in rows if r["id"] == session_id)
     assert row["event_count"] > 0
     assert isinstance(row["truncated"], bool)
+
+
+def test_sessions_are_listed_newest_first(client: TestClient, recordings: Path) -> None:
+    """The UI opens the first entry, so the first entry must be the recording you just made.
+
+    `record --ui` serves the whole directory. While this was sorted alphabetically, a second
+    recording in the folder silently opened the wrong one -- and every query then failed as
+    "variable never recorded", which reads like a broken recording rather than a wrong pick.
+    """
+    older = record_into(recordings, "loops", "main")
+    newer = record_into(recordings, "simple", "main")
+    # Make the intent explicit rather than trusting write order to differ measurably.
+    os.utime(recordings / f"{older}.chrono", (time.time() - 3600, time.time() - 3600))
+
+    ids = [row["id"] for row in client.get("/api/sessions").json()]
+    assert ids.index(newer) < ids.index(older), f"newest must come first, got {ids}"
 
 
 def test_session_meta(client: TestClient, session_id: str) -> None:

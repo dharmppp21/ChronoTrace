@@ -98,9 +98,20 @@ class SessionStore:
         return path
 
     def summaries(self) -> list[dto.SessionSummary]:
-        """Every readable recording in the directory. A damaged one is skipped, not fatal."""
+        """Every readable recording in the directory, NEWEST FIRST. A damaged one is skipped.
+
+        Newest first rather than alphabetical, because the UI opens the first entry and the
+        recording someone wants is the one they just made -- `record --ui` serves the whole
+        directory, so with two recordings present an alphabetical list silently opened the
+        wrong one, and every query against it then failed as "variable never recorded".
+
+        This is the same rule the CLI uses when a query is given no path (`_newest_recording`),
+        so "which recording did it pick?" has one answer across both front ends.
+        """
         out: list[dto.SessionSummary] = []
-        for path in sorted(self.dir.glob("*.chrono")):
+        for path in sorted(
+            self.dir.glob("*.chrono"), key=lambda p: p.stat().st_mtime, reverse=True
+        ):
             try:
                 with ChronoReader.open(path) as reader:
                     indexed = self._indexed(path)
