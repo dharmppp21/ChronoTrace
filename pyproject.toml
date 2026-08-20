@@ -108,7 +108,7 @@ dev = [
     # inside markdown, and a floating range turned that into a red build on untouched docs.
     # Dependabot proposes the bump (.github/dependabot.yml), so pinned does not mean stale; it
     # means the version changes in a reviewed commit instead of whenever CI happens to run.
-    "ruff==0.16.2",
+    "ruff==0.16.3",
     "mypy>=1.14",
     "hypothesis>=6",
     # Starlette's TestClient transport, not something this project imports directly -- nothing
