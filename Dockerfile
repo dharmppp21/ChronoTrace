@@ -34,7 +34,7 @@ RUN cd frontend && npm run build
 # ---------------------------------------------------------------------------
 # Stage 2: build the wheel, reusing the UI that stage 1 already built.
 # ---------------------------------------------------------------------------
-FROM python:3.14-slim AS builder
+FROM python:3.15-slim AS builder
 WORKDIR /build
 
 COPY . .
@@ -62,7 +62,7 @@ RUN rm -rf dist && pip install --no-cache-dir build && python -m build --wheel
 # Note the deliberate asymmetry with tests/packaging/Dockerfile.clean, which stays UNpinned:
 # that file is a canary and *should* track upstream so an upstream break surfaces as a red
 # nightly. This file is a published artifact and should be reproducible. Different jobs.
-FROM python:3.14-slim@sha256:ce40764625a4ff50df3548277632e7f96c4e77fe75fa848aae9885476e7df5a4 AS runtime
+FROM python:3.15-slim@sha256:65a65fc7b30b06cb6df4930fd4650697cb23f4c2698ab81fc87e4b031bc36928 AS runtime
 
 # A fixed high UID, created before anything is installed. Running as root in a container that
 # serves HTTP to a browser is an unnecessary risk, and `--user` at run time is something nobody
